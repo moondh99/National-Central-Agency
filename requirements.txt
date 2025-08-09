@@ -3,3 +3,5 @@ beautifulsoup4
 feedparser
 pandas
 numpy
+selenium 
+webdriver-manager
