@@ -340,7 +340,7 @@ def main():
     # 특정 섹션만 크롤링: ['politics', 'economy'] 등
     sections_to_crawl = None  # 모든 섹션
     max_pages = 5  # 각 섹션당 최대 페이지 수
-    split_by_section = True  # True: 섹션별 파일, False: 통합 파일
+    split_by_section = False  # True: 섹션별 파일, False: 통합 파일
 
     try:
         # 크롤링 실행
