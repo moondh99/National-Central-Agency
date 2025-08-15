@@ -12,29 +12,17 @@ class MBNRSSCollector:
     def __init__(self):
         self.base_url = "https://www.mbn.co.kr"
 
-        # 뉴스 카테고리 RSS 피드
-        self.news_rss_feeds = {
-            "전체기사": "http://www.mbn.co.kr/rss/",
-            "정치": "http://www.mbn.co.kr/rss/politics/",
-            "경제": "http://www.mbn.co.kr/rss/economy/",
-            "사회": "http://www.mbn.co.kr/rss/society/",
-            "국제": "http://www.mbn.co.kr/rss/international/",
-            "문화": "http://www.mbn.co.kr/rss/culture/",
-            "연예": "http://www.mbn.co.kr/rss/enter/",
-            "스포츠": "http://www.mbn.co.kr/rss/sports/",
-            "생활·건강": "http://www.mbn.co.kr/rss/health/",
-        }
-
         # 영상 카테고리 RSS 피드
         self.video_rss_feeds = {
             "MBN종합뉴스": "http://www.mbn.co.kr/rss/vod/vod_rss_552.xml",
             "굿모닝MBN": "http://www.mbn.co.kr/rss/vod/vod_rss_605.xml",
-            "아침&매일경제": "http://www.mbn.co.kr/rss/vod/vod_rss_606.xml",
-            "뉴스파이터": "http://www.mbn.co.kr/rss/vod/vod_rss_673.xml",
-            "MBN프레스룸": "http://www.mbn.co.kr/rss/vod/vod_rss_812.xml",
-            "MBN뉴스와이드": "http://www.mbn.co.kr/rss/vod/vod_rss_536.xml",
         }
 
+        # 뉴스 카테고리 RSS 피드
+        self.news_rss_feeds = {
+            # '정치': 'http://www.mbn.co.kr/rss/news/news_rss_지난.xml',
+            # 사용자 정의 뉴스 RSS URL을 여기에 추가하세요
+        }
         # 전체 RSS 피드 (뉴스 + 영상)
         self.all_rss_feeds = {**self.news_rss_feeds, **self.video_rss_feeds}
 
@@ -179,7 +167,7 @@ class MBNRSSCollector:
                 print(f"RSS 피드가 비어있습니다: {rss_url}")
                 return articles
 
-            for entry in feed.entries:
+            for entry in feed.entries[:20]:  # 상위 20개 항목만 처리
                 try:
                     # 기본 정보 추출
                     title = self.clean_text(entry.get("title", ""))
@@ -242,30 +230,29 @@ class MBNRSSCollector:
 
     def save_to_csv(self, articles, filename):
         """CSV 파일로 저장"""
+        # custom CSV: 언론사, 제목, 날짜, 카테고리, 기자명, 본문
         if not articles:
             print("저장할 기사가 없습니다.")
             return
-
-        fieldnames = [
-            "category",
-            "title",
-            "link",
-            "description",
-            "content",
-            "reporter",
-            "author",
-            "rss_category",
-            "is_video",
-            "pub_date",
-            "collected_at",
-        ]
-
-        with open(filename, "w", newline="", encoding="utf-8-sig") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(articles)
-
-        print(f"\n총 {len(articles)}개 기사가 {filename}에 저장되었습니다.")
+        # 파일명 override
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_filename = f"results/MBN_전체_{timestamp}.csv"
+        with open(csv_filename, "w", newline="", encoding="utf-8-sig") as csvfile:
+            writer = csv.writer(csvfile)
+            # 헤더
+            writer.writerow(["언론사", "제목", "날짜", "카테고리", "기자명", "본문"])
+            for art in articles:
+                writer.writerow(
+                    [
+                        "MBN",
+                        art.get("title", ""),
+                        art.get("pub_date", ""),
+                        art.get("category", ""),
+                        "MBN",  # 통일된 기자명
+                        art.get("description", ""),
+                    ]
+                )
+        print(f"\n✅ MBN 뉴스 {len(articles)}개 저장 완료: {csv_filename}")
 
     def run_collection(self, content_type="news", selected_categories=None):
         """전체 수집 실행"""
@@ -337,20 +324,8 @@ def main():
     """메인 실행 함수"""
     collector = MBNRSSCollector()
 
-    # 사용 예시 1: 뉴스만 수집
-    collector.run_collection(content_type="news")
-
-    # 사용 예시 2: 영상만 수집
-    # collector.run_collection(content_type='video')
-
-    # 사용 예시 3: 전체 수집 (뉴스 + 영상)
-    # collector.run_collection(content_type='all')
-
-    # 사용 예시 4: 특정 카테고리만 수집
-    # collector.run_collection(content_type='news', selected_categories=['정치', '경제', '사회'])
-
-    # 사용 예시 5: 특정 영상 프로그램만 수집
-    # collector.run_collection(content_type='video', selected_categories=['MBN종합뉴스', '뉴스파이터'])
+    # 모든 뉴스 및 영상 RSS를 상위 20개씩 자동 수집
+    collector.run_collection(content_type="all")
 
 
 if __name__ == "__main__":

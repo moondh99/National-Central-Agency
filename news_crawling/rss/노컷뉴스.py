@@ -1,369 +1,227 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-노컷뉴스 RSS 크롤링 프로그램
-다양한 카테고리의 노컷뉴스를 RSS 피드로 수집하여 CSV로 저장
-"""
-
 import requests
-import xml.etree.ElementTree as ET
+import feedparser
 from bs4 import BeautifulSoup
-import csv
-import time
-import random
-import logging
+import pandas as pd
+import os
 from datetime import datetime
+import time
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
-class NocutNewsCrawler:
-    def __init__(self):
-        # 로깅 설정
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('nocut_news_rss_crawler.log', encoding='utf-8'),
-                logging.StreamHandler()
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
-        
-        # 노컷뉴스 RSS 피드 목록
-        self.rss_feeds = {
-            "정치": "https://www.nocutnews.co.kr/news/politics",
-            "경제": "https://www.nocutnews.co.kr/news/economy", 
-            "사회": "https://www.nocutnews.co.kr/news/society",
-            "문화": "https://www.nocutnews.co.kr/news/culture",
-            "국제": "https://www.nocutnews.co.kr/news/world",
-            "연예": "https://www.nocutnews.co.kr/news/entertainment",
-            "IT": "https://www.nocutnews.co.kr/news/it",
-            "스포츠": "https://www.nocutnews.co.kr/news/sports",
-            "지역": "https://www.nocutnews.co.kr/news/area",
-            "사진": "https://www.nocutnews.co.kr/news/photo",
-            "평양": "http://yd.nocutnews.co.kr/news/list",
-            "경상남도": "http://gn.nocutnews.co.kr/news/list", 
-            "제주": "http://jeju.nocutnews.co.kr/news/list",
-            "울산": "http://us.nocutnews.co.kr/news/list",
-            "대전": "http://dj.nocutnews.co.kr/news/list",
-            "대구": "http://tg.nocutnews.co.kr/news/list",
-            "강원": "http://kw.nocutnews.co.kr/news/list",
-            "부산": "http://ps.nocutnews.co.kr/news/list",
-            "포항": "http://ph.nocutnews.co.kr/news/list"
+# RSS 피드 URL 딕셔너리
+rss_feeds = {
+    "정치": "https://rss.nocutnews.co.kr/category/politics.xml",
+    "경제": "https://rss.nocutnews.co.kr/category/economy.xml",
+    "사회": "https://rss.nocutnews.co.kr/category/society.xml",
+    "문화": "https://rss.nocutnews.co.kr/category/culture.xml",
+    "세계": "https://rss.nocutnews.co.kr/category/world.xml",
+    "전국": "https://rss.nocutnews.co.kr/category/area.xml",
+    "오피니언": "https://rss.nocutnews.co.kr/category/opinion.xml",
+    "전체": "https://rss.nocutnews.co.kr/news/news.xml",
+    "강원": "https://rss.nocutnews.co.kr/news/gangwon.xml",
+    "강원영동": "https://rss.nocutnews.co.kr/news/yeongdong.xml",
+    "경남": "https://rss.nocutnews.co.kr/news/gyeongnam.xml",
+    "광주": "https://rss.nocutnews.co.kr/news/gwangju.xml",
+    "대구": "https://rss.nocutnews.co.kr/news/daegu.xml",
+    "대전": "https://rss.nocutnews.co.kr/news/daejeon.xml",
+    "부산": "https://rss.nocutnews.co.kr/news/busan.xml",
+    "울산": "https://rss.nocutnews.co.kr/news/ulsan.xml",
+    "전남": "https://rss.nocutnews.co.kr/news/jeonnam.xml",
+    "전북": "https://rss.nocutnews.co.kr/news/jeonbuk.xml",
+    "제주": "https://rss.nocutnews.co.kr/news/jeju.xml",
+    "청주": "https://rss.nocutnews.co.kr/news/cheongju.xml",
+    "포항": "https://rss.nocutnews.co.kr/news/pohang.xml",
+}
+
+
+def get_article_content(url):
+    """기사 URL에서 본문과 기자명을 추출하는 함수"""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
-        
-        # RSS 피드 URL 매핑 (실제 RSS 엔드포인트)
-        self.rss_url_mapping = {
-            "정치": "https://rss.nocutnews.co.kr/category/politics.xml",
-            "경제": "https://rss.nocutnews.co.kr/category/economy.xml",
-            "사회": "https://rss.nocutnews.co.kr/category/society.xml", 
-            "문화": "https://rss.nocutnews.co.kr/category/culture.xml",
-            "국제": "https://rss.nocutnews.co.kr/category/world.xml",
-            "연예": "https://rss.nocutnews.co.kr/category/entertainment.xml",
-            "IT": "https://rss.nocutnews.co.kr/category/it.xml",
-            "스포츠": "https://rss.nocutnews.co.kr/category/sports.xml",
-            "지역": "https://rss.nocutnews.co.kr/category/area.xml",
-            "사진": "https://rss.nocutnews.co.kr/category/photo.xml",
-            "평양": "https://rss.nocutnews.co.kr/news/pyongyang.xml",
-            "경상남도": "https://rss.nocutnews.co.kr/news/gyeongnam.xml",
-            "제주": "https://rss.nocutnews.co.kr/news/jeju.xml",
-            "울산": "https://rss.nocutnews.co.kr/news/ulsan.xml",
-            "대전": "https://rss.nocutnews.co.kr/news/daejeon.xml",
-            "대구": "https://rss.nocutnews.co.kr/news/daegu.xml",
-            "강원": "https://rss.nocutnews.co.kr/news/gangwon.xml",
-            "부산": "https://rss.nocutnews.co.kr/news/busan.xml",
-            "포항": "https://rss.nocutnews.co.kr/news/pohang.xml"
-        }
-        
-        # User-Agent 목록
-        self.user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/91.0.864.59'
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, "html.parser")
+
+        # 본문 추출 (지정된 XPath: /html/body/form/div[3]/div[3]/div[2]/div[1]/div[1])
+        content = ""
+        content_selectors = [
+            "html > body > form > div:nth-child(3) > div:nth-child(3) > div:nth-child(2) > div:nth-child(1) > div:nth-child(1)",
+            "div.article_text",
+            "div.article-body",
+            '[class*="article"]',
+            '[class*="content"]',
         ]
-        
-        self.articles = []
-        
-    def get_random_headers(self):
-        """랜덤 User-Agent 헤더 반환"""
-        return {
-            'User-Agent': random.choice(self.user_agents),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ko-KR,ko;q=0.8,en-US;q=0.5,en;q=0.3',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
-    
-    def clean_text(self, text):
-        """텍스트 정제 함수"""
-        if not text:
-            return ""
-        
-        # CDATA 태그 제거
-        text = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', text, flags=re.DOTALL)
-        
-        # HTML 태그 제거
-        soup = BeautifulSoup(text, 'html.parser')
-        text = soup.get_text()
-        
-        # 여러 공백을 하나로 변환
-        text = re.sub(r'\s+', ' ', text)
-        
-        return text.strip()
-    
-    def extract_reporter_name(self, content):
-        """기사 내용에서 기자명 추출"""
-        if not content:
-            return "기자명 없음"
-            
-        # 노컷뉴스 기자명 패턴들
-        patterns = [
-            r'([가-힣]{2,4})\s*기자',
-            r'기자\s*([가-힣]{2,4})',
-            r'([가-힣]{2,4})\s*특파원',
-            r'([가-힣]{2,4})\s*논설위원',
-            r'([가-힣]{2,4})\s*편집위원',
-            r'노컷뉴스\s*([가-힣]{2,4})',
-            r'CBS\s*([가-힣]{2,4})',
-            r'리포터\s*([가-힣]{2,4})',
-            r'([가-힣]{2,4})\s*리포터'
+
+        for selector in content_selectors:
+            content_element = soup.select_one(selector)
+            if content_element:
+                content = content_element.get_text(strip=True)
+                break
+
+        # 기자명 추출 (지정된 XPath: /html/body/form/div[3]/div[3]/div[1])
+        reporter = ""
+        reporter_selectors = [
+            "html > body > form > div:nth-child(3) > div:nth-child(3) > div:nth-child(1)",
+            '[class*="reporter"]',
+            '[class*="author"]',
+            '[class*="writer"]',
         ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, content)
-            if match:
-                return match.group(1) + " 기자"
-        
-        return "기자명 없음"
-    
-    def format_date(self, date_str):
-        """날짜 형식 변환"""
-        try:
-            # RFC 2822 형식 파싱 시도
-            dt = datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %z')
-            return dt.strftime('%Y-%m-%d %H:%M:%S')
-        except:
+
+        for selector in reporter_selectors:
+            reporter_element = soup.select_one(selector)
+            if reporter_element:
+                reporter_text = reporter_element.get_text(strip=True)
+                # 기자명 패턴 추출
+                reporter_patterns = [
+                    r"([가-힣]+)\s*기자",
+                    r"기자\s*([가-힣]+)",
+                    r"([가-힣]+\s+[가-힣]+)\s*기자",
+                ]
+
+                for pattern in reporter_patterns:
+                    match = re.search(pattern, reporter_text)
+                    if match:
+                        reporter = match.group(1).strip() + " 기자"
+                        break
+
+                if not reporter and reporter_text:
+                    reporter = reporter_text[:50]  # 최대 50자만
+                break
+
+        return content, reporter
+
+    except Exception as e:
+        print(f"기사 내용 추출 실패 ({url}): {str(e)}")
+        return "", ""
+
+
+def collect_news_from_rss(category, rss_url, max_articles=20):
+    """RSS 피드에서 뉴스를 수집하는 함수"""
+    try:
+        print(f"\n{category} 카테고리 수집 중...")
+
+        # RSS 피드 파싱
+        feed = feedparser.parse(rss_url)
+
+        if not feed.entries:
+            print(f"  {category}: RSS 피드에서 데이터를 가져올 수 없습니다.")
+            return []
+
+        articles = []
+        collected_count = 0
+
+        for entry in feed.entries[:max_articles]:
+            if collected_count >= max_articles:
+                break
+
             try:
-                # GMT 없는 형식 시도
-                dt = datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S GMT')
-                return dt.strftime('%Y-%m-%d %H:%M:%S')
-            except:
-                try:
-                    # 한국 시간 형식 시도
-                    dt = datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S KST')
-                    return dt.strftime('%Y-%m-%d %H:%M:%S')
-                except:
-                    try:
-                        # 다른 형식 시도
-                        dt = datetime.strptime(date_str[:19], '%Y-%m-%d %H:%M:%S')
-                        return dt.strftime('%Y-%m-%d %H:%M:%S')
-                    except:
-                        return date_str
-    
-    def get_article_content(self, url):
-        """기사 본문 가져오기"""
-        try:
-            headers = self.get_random_headers()
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # 노컷뉴스 기사 본문 셀렉터들
-            content_selectors = [
-                'div.article_content',
-                'div.news_view_detail',
-                'div.article_txt',
-                'div.view_txt',
-                '.news_cnt_detail_wrap',
-                'div.news_text',
-                'div.article-body',
-                '.article_wrap .content',
-                'div.story',
-                '.detail_story'
-            ]
-            
-            content = ""
-            for selector in content_selectors:
-                content_element = soup.select_one(selector)
-                if content_element:
-                    content = content_element.get_text()
-                    break
-            
-            if not content:
-                # 기본적인 p 태그에서 내용 추출
-                paragraphs = soup.find_all('p')
-                content = ' '.join([p.get_text() for p in paragraphs])
-            
-            # 내용 정제
-            content = self.clean_text(content)
-            
-            # 500자로 제한
-            if len(content) > 500:
-                content = content[:500] + "..."
-            
-            return content
-            
-        except Exception as e:
-            self.logger.warning(f"기사 본문 추출 실패 ({url}): {e}")
-            return "본문 추출 실패"
-    
-    def parse_rss_feed(self, category, url):
-        """RSS 피드 파싱"""
-        try:
-            self.logger.info(f"{category} RSS 피드 크롤링 시작: {url}")
-            
-            headers = self.get_random_headers()
-            response = requests.get(url, headers=headers, timeout=15)
-            response.raise_for_status()
-            
-            # 응답이 비어있는지 확인
-            if not response.content.strip():
-                self.logger.error(f"{category} RSS 피드가 비어있습니다: {url}")
-                return []
-            
-            # XML 파싱
-            try:
-                root = ET.fromstring(response.content)
-            except ET.ParseError as e:
-                self.logger.error(f"{category} RSS XML 파싱 오류: {e}")
-                return []
-            
-            # RSS 아이템 추출
-            items = root.findall('.//item')
-            
-            if not items:
-                self.logger.warning(f"{category} RSS 피드에서 아이템을 찾을 수 없습니다")
-                return []
-            
-            articles = []
-            
-            # 최대 5개 기사만 처리
-            for i, item in enumerate(items[:5]):
-                try:
-                    title_elem = item.find('title')
-                    link_elem = item.find('link')
-                    pubdate_elem = item.find('pubDate')
-                    description_elem = item.find('description')
-                    
-                    if title_elem is None or link_elem is None:
-                        continue
-                    
-                    title = self.clean_text(title_elem.text)
-                    link = link_elem.text.strip()
-                    pub_date = self.format_date(pubdate_elem.text) if pubdate_elem is not None else ""
-                    description = self.clean_text(description_elem.text) if description_elem is not None else ""
-                    
-                    # 기사 본문 가져오기
-                    self.logger.info(f"기사 본문 추출 중: {title[:30]}...")
-                    content = self.get_article_content(link)
-                    
-                    # 기자명 추출
-                    reporter = self.extract_reporter_name(content)
-                    
-                    article = {
-                        'title': title,
-                        'category': category,
-                        'date': pub_date,
-                        'reporter': reporter,
-                        'content': content,
-                        'url': link
-                    }
-                    
-                    articles.append(article)
-                    
-                    # 서버 부하 방지를 위한 딜레이
-                    time.sleep(random.uniform(2, 5))
-                    
-                except Exception as e:
-                    self.logger.error(f"기사 처리 중 오류 발생: {e}")
+                # 기본 정보 추출
+                title = entry.title if hasattr(entry, "title") else ""
+                link = entry.link if hasattr(entry, "link") else ""
+                pub_date = entry.published if hasattr(entry, "published") else ""
+
+                if not title or not link:
                     continue
-            
-            self.logger.info(f"{category} 카테고리에서 {len(articles)}개 기사 수집 완료")
-            return articles
-            
-        except requests.RequestException as e:
-            self.logger.error(f"{category} RSS 피드 요청 오류: {e}")
-            return []
-        except Exception as e:
-            self.logger.error(f"{category} RSS 피드 처리 중 오류: {e}")
-            return []
-    
-    def crawl_all_feeds(self):
-        """모든 RSS 피드 크롤링"""
-        self.logger.info("노컷뉴스 RSS 크롤링 시작")
-        
-        # 주요 카테고리만 선별하여 크롤링 (너무 많은 지역 카테고리 제외)
-        main_categories = ["정치", "경제", "사회", "문화", "국제", "연예", "IT", "스포츠", "지역", "사진"]
-        
-        for category in main_categories:
-            if category in self.rss_url_mapping:
-                url = self.rss_url_mapping[category]
-                self.logger.info(f"\n=== {category} 카테고리 크롤링 ===")
-                
-                articles = self.parse_rss_feed(category, url)
-                self.articles.extend(articles)
-                
-                # 카테고리 간 딜레이
-                time.sleep(random.uniform(3, 7))
-        
-        self.logger.info(f"\n총 {len(self.articles)}개 기사 수집 완료")
-    
-    def save_to_csv(self, filename=None):
-        """CSV 파일로 저장"""
-        if not filename:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"results/nocut_news_articles_{timestamp}.csv"
-        
-        try:
-            with open(filename, 'w', newline='', encoding='utf-8-sig') as csvfile:
-                fieldnames = ['title', 'category', 'date', 'reporter', 'content', 'url']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                
-                writer.writeheader()
-                writer.writerows(self.articles)
-            
-            self.logger.info(f"CSV 파일 저장 완료: {filename}")
-            print(f"\n✅ 크롤링 완료! 결과 파일: {filename}")
-            print(f"📊 총 수집된 기사: {len(self.articles)}개")
-            
-        except Exception as e:
-            self.logger.error(f"CSV 파일 저장 실패: {e}")
+
+                # 날짜 파싱
+                try:
+                    if pub_date:
+                        # feedparser가 자동으로 파싱한 날짜 사용
+                        if hasattr(entry, "published_parsed") and entry.published_parsed:
+                            date_obj = datetime(*entry.published_parsed[:6])
+                            formatted_date = date_obj.strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            formatted_date = pub_date
+                    else:
+                        formatted_date = ""
+                except:
+                    formatted_date = pub_date
+
+                # 기사 본문과 기자명 추출
+                content, reporter = get_article_content(link)
+
+                article_data = {
+                    "언론사": "노컷뉴스",
+                    "제목": title,
+                    "날짜": formatted_date,
+                    "카테고리": category,
+                    "기자명": reporter,
+                    "본문": content,
+                }
+
+                articles.append(article_data)
+                collected_count += 1
+
+                print(f"  {category}: {collected_count}/{max_articles} 수집 완료")
+
+                # 서버 부하 방지를 위한 딜레이
+                time.sleep(0.5)
+
+            except Exception as e:
+                print(f"  {category}: 기사 처리 중 오류 - {str(e)}")
+                continue
+
+        print(f"  {category}: 총 {len(articles)}개 기사 수집 완료")
+        return articles
+
+    except Exception as e:
+        print(f"{category} 카테고리 수집 실패: {str(e)}")
+        return []
+
 
 def main():
     """메인 실행 함수"""
-    crawler = NocutNewsCrawler()
-    
-    print("🚀 노컷뉴스 RSS 크롤링을 시작합니다...")
-    print("📰 수집 대상 카테고리: 정치, 경제, 사회, 문화, 국제, 연예, IT, 스포츠, 지역, 사진")
-    print("⏳ 서버 부하 방지를 위해 딜레이가 적용됩니다.\n")
-    
-    try:
-        # RSS 피드 크롤링
-        crawler.crawl_all_feeds()
-        
-        # CSV 파일로 저장
-        crawler.save_to_csv()
-        
-        # 결과 요약 출력
-        if crawler.articles:
-            print(f"\n📋 카테고리별 수집 현황:")
-            category_count = {}
-            for article in crawler.articles:
-                category = article['category']
-                category_count[category] = category_count.get(category, 0) + 1
-            
-            for category, count in category_count.items():
-                print(f"   • {category}: {count}개")
-        
-    except KeyboardInterrupt:
-        print("\n❌ 사용자에 의해 중단되었습니다.")
-    except Exception as e:
-        print(f"\n❌ 크롤링 중 오류 발생: {e}")
-        logging.error(f"메인 실행 오류: {e}")
+    print("노컷뉴스 RSS 피드 수집을 시작합니다...")
+    print(f"총 {len(rss_feeds)}개 카테고리에서 각각 20개씩 수집합니다.")
 
+    # results 디렉토리 생성
+    os.makedirs("results", exist_ok=True)
+
+    all_articles = []
+
+    # 각 RSS 피드에서 뉴스 수집
+    for category, rss_url in rss_feeds.items():
+        articles = collect_news_from_rss(category, rss_url, max_articles=20)
+        all_articles.extend(articles)
+
+        # 카테고리간 딜레이
+        time.sleep(1)
+
+    if not all_articles:
+        print("수집된 기사가 없습니다.")
+        return
+
+    # DataFrame 생성
+    df = pd.DataFrame(all_articles)
+
+    # 컬럼 순서 정렬
+    column_order = ["언론사", "제목", "날짜", "카테고리", "기자명", "본문"]
+    df = df[column_order]
+
+    # 파일명 생성 (타임스탬프 포함)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"results/노컷뉴스_전체_{timestamp}.csv"
+
+    # CSV 파일 저장 (UTF-8 BOM 인코딩으로 Excel 호환성 확보)
+    df.to_csv(filename, index=False, encoding="utf-8-sig")
+
+    print(f"\n=== 수집 완료 ===")
+    print(f"총 수집 기사 수: {len(all_articles)}개")
+    print(f"저장된 파일: {filename}")
+    print(f"파일 크기: {os.path.getsize(filename):,} 바이트")
+
+    # 카테고리별 통계
+    category_counts = df["카테고리"].value_counts()
+    print(f"\n카테고리별 수집 현황:")
+    for category, count in category_counts.items():
+        print(f"  {category}: {count}개")
+
+    return filename
+
+
+# 실행
 if __name__ == "__main__":
-    main()
+    result_file = main()

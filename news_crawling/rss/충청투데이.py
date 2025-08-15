@@ -6,15 +6,13 @@ import time
 import random
 from datetime import datetime
 import re
+import os  # 추가
 
 
 class CCTodayRSSCollector:
     def __init__(self):
         self.base_url = "https://www.cctoday.co.kr"
-        self.rss_feeds = {
-            "전체기사": "https://www.cctoday.co.kr/rss/allArticle.xml",
-            "인기기사": "https://www.cctoday.co.kr/rss/clickTop.xml",
-        }
+        self.rss_feeds = {"전체기사": "https://www.cctoday.co.kr/rss/allArticle.xml"}
 
         # User-Agent 리스트 (랜덤 선택용)
         self.user_agents = [
@@ -75,6 +73,20 @@ class CCTodayRSSCollector:
             response.encoding = "utf-8"
 
             soup = BeautifulSoup(response.text, "html.parser")
+
+            # 원문 페이지의 article-view-content-div에서 본문 및 기자명 추출
+            article_elem = soup.find("article", id="article-view-content-div")
+            if article_elem:
+                paragraphs = article_elem.find_all("p")
+                texts = [p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)]
+                if texts:
+                    # 마지막 문단에서 기자명 추출
+                    reporter = self.extract_reporter_name(texts[-1]) or ""
+                    # 본문은 마지막 제외한 모든 문단
+                    content = " ".join(texts[:-1])
+                    content = self.clean_text(content)
+                    print(f"    원문 본문 및 기자({reporter}) 추출 완료")
+                    return content, reporter
 
             # 기사 본문 추출 (충청투데이의 본문 구조에 맞게)
             content_selectors = [
@@ -151,7 +163,7 @@ class CCTodayRSSCollector:
                 print(f"RSS 피드가 비어있습니다: {rss_url}")
                 return articles
 
-            for entry in feed.entries:
+            for entry in feed.entries[:20]:  # 최대 20개 기사만 처리
                 try:
                     # 기본 정보 추출
                     title = self.clean_text(entry.get("title", ""))
@@ -220,39 +232,32 @@ class CCTodayRSSCollector:
 
     def run_collection(self):
         """전체 수집 실행"""
-        print("=" * 60)
-        print("충청투데이(cctoday.co.kr) RSS 뉴스 수집기")
-        print("=" * 60)
-
+        print("충청투데이 RSS 자동 수집 시작...")
         all_articles = []
-
-        # 각 카테고리별 RSS 피드 수집
         for category, rss_url in self.rss_feeds.items():
-            articles = self.collect_rss_feed(category, rss_url)
-            all_articles.extend(articles)
-            time.sleep(2)  # 카테고리 간 대기시간
-
-        # 결과 저장
+            all_articles.extend(self.collect_rss_feed(category, rss_url))
+            time.sleep(2)
+        # 단일 CSV로 저장
         if all_articles:
+            os.makedirs("results", exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"results/cctoday_news_{timestamp}.csv"
-            self.save_to_csv(all_articles, filename)
-
-            # 수집 결과 요약
-            print("\n" + "=" * 60)
-            print("수집 결과 요약")
-            print("=" * 60)
-
-            category_counts = {}
-            for article in all_articles:
-                category = article["category"]
-                category_counts[category] = category_counts.get(category, 0) + 1
-
-            for category, count in category_counts.items():
-                print(f"{category}: {count}개")
-
-            print(f"\n전체: {len(all_articles)}개 기사 수집 완료")
-            print(f"파일명: {filename}")
+            filename = f"results/충청투데이_전체_{timestamp}.csv"
+            with open(filename, "w", newline="", encoding="utf-8-sig") as csvfile:
+                fieldnames = ["언론사", "제목", "날짜", "카테고리", "기자명", "본문"]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for art in all_articles:
+                    writer.writerow(
+                        {
+                            "언론사": "충청투데이",
+                            "제목": art["title"],
+                            "날짜": art["pub_date"],
+                            "카테고리": art["category"],
+                            "기자명": art["reporter"],
+                            "본문": art["content"],
+                        }
+                    )
+            print(f"총 {len(all_articles)}개 기사 저장: {filename}")
         else:
             print("수집된 기사가 없습니다.")
 

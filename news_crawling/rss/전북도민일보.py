@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-전북도민일보 RSS 수집기
-Created: 2025년 8월
-Description: 전북도민일보(www.domin.co.kr)의 RSS 피드를 수집하여 CSV 파일로 저장
-"""
-
 import feedparser
 import requests
 from bs4 import BeautifulSoup
@@ -120,130 +111,67 @@ class DominRSSCollector:
 
         return "정보없음"
 
-    def collect_rss_feed(self, category_name, rss_file):
-        """특정 카테고리의 RSS 피드 수집"""
-        rss_url = f"{self.base_url}/rss/{rss_file}"
-
+    def extract_article_content(self, article_url):
+        """기사 본문 추출"""
         try:
-            print(f"{category_name} 카테고리 수집 중: {rss_url}")
-
             headers = {"User-Agent": self.get_random_user_agent()}
-            response = self.session.get(rss_url, headers=headers, timeout=15)
+            response = self.session.get(article_url, headers=headers, timeout=10)
             response.raise_for_status()
-
-            # RSS 파싱
-            feed = feedparser.parse(response.content)
-
-            if not feed.entries:
-                print(f"❌ {category_name}: RSS 항목이 없습니다.")
-                return []
-
-            articles = []
-
-            for entry in feed.entries:
-                try:
-                    # 기본 정보 추출
-                    title = self.clean_text(entry.title)
-                    link = entry.link
-
-                    # 발행일 처리
-                    pub_date = ""
-                    if hasattr(entry, "published"):
-                        try:
-                            # 전북도민일보의 날짜 형식 처리
-                            from dateutil import parser
-
-                            parsed_date = parser.parse(entry.published)
-                            pub_date = parsed_date.strftime("%Y-%m-%d %H:%M:%S")
-                        except:
-                            pub_date = entry.published
-                    elif hasattr(entry, "updated"):
-                        try:
-                            from dateutil import parser
-
-                            parsed_date = parser.parse(entry.updated)
-                            pub_date = parsed_date.strftime("%Y-%m-%d %H:%M:%S")
-                        except:
-                            pub_date = entry.updated
-
-                    # 요약 내용
-                    summary = ""
-                    if hasattr(entry, "summary"):
-                        summary = self.clean_text(entry.summary)
-                    elif hasattr(entry, "description"):
-                        summary = self.clean_text(entry.description)
-
-                    # 이미지 URL (전북도민일보는 RSS에서 이미지 제공)
-                    image_url = ""
-                    if hasattr(entry, "media_content") and entry.media_content:
-                        image_url = entry.media_content[0]["url"]
-                    elif hasattr(entry, "enclosures") and entry.enclosures:
-                        image_url = entry.enclosures[0].href
-
-                    # 작성자 정보 (RSS에서 먼저 확인)
-                    reporter = "정보수집중"
-                    if hasattr(entry, "author") and entry.author:
-                        reporter = self.clean_text(entry.author)
-                    else:
-                        # RSS에 작성자 정보가 없으면 기사에서 추출 (선택적)
-                        if len(articles) < 3:  # 처음 3개 기사만 기자명 추출
-                            reporter = self.extract_reporter_name(link)
-                            time.sleep(random.uniform(0.5, 1.0))  # 요청 간격
-
-                    article_data = {
-                        "category": category_name,
-                        "title": title,
-                        "link": link,
-                        "published": pub_date,
-                        "summary": summary,
-                        "image_url": image_url,
-                        "reporter": reporter,
-                        "collected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    }
-
-                    articles.append(article_data)
-
-                except Exception as e:
-                    print(f"기사 처리 오류: {e}")
-                    continue
-
-            print(f"✅ {category_name}: {len(articles)}개 기사 수집 완료")
-            return articles
-
+            soup = BeautifulSoup(response.content, "html.parser")
+            content_div = soup.find("div", id="article-view-content-div")
+            if content_div:
+                return self.clean_text(content_div.get_text(separator="\n"))
         except Exception as e:
-            print(f"❌ {category_name} RSS 수집 실패: {e}")
-            return []
+            print(f"본문 추출 오류 ({article_url}): {e}")
+        return ""
+
+    def collect_rss_feed(self, category_name, rss_file):
+        """특정 카테고리의 RSS 피드에서 20개 기사 자동 수집"""
+        rss_url = f"{self.base_url}/rss/{rss_file}"
+        print(f"{category_name} 자동 수집 중: {rss_url}")
+        headers = {"User-Agent": self.get_random_user_agent()}
+        response = self.session.get(rss_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        feed = feedparser.parse(response.content)
+        entries = feed.entries[:20]
+        articles = []
+        for entry in entries:
+            title = self.clean_text(entry.title)
+            link = entry.link
+            pub_date = getattr(entry, "published", getattr(entry, "updated", ""))
+            reporter = self.clean_text(entry.author) if hasattr(entry, "author") and entry.author else "정보없음"
+            # 페이지에서 본문 추출, 실패 시 RSS summary fallback
+            content = self.extract_article_content(link)
+            if not content:
+                if hasattr(entry, "summary"):
+                    content = self.clean_text(entry.summary)
+                elif hasattr(entry, "description"):
+                    content = self.clean_text(entry.description)
+            articles.append(
+                {
+                    "언론사": "전북도민일보",
+                    "제목": title,
+                    "날짜": pub_date,
+                    "카테고리": category_name,
+                    "기자명": reporter,
+                    "본문": content,
+                }
+            )
+            time.sleep(random.uniform(0.5, 1.0))
+        return articles
 
     def save_to_csv(self, all_articles, filename=None):
         """수집된 기사들을 CSV 파일로 저장"""
-        if not filename:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"results/전북도민일보_RSS_{timestamp}.csv"
-
-        try:
-            with open(filename, "w", newline="", encoding="utf-8-sig") as csvfile:
-                fieldnames = [
-                    "category",
-                    "title",
-                    "link",
-                    "published",
-                    "summary",
-                    "image_url",
-                    "reporter",
-                    "collected_at",
-                ]
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-
-                writer.writeheader()
-                for article in all_articles:
-                    writer.writerow(article)
-
-            print(f"📄 CSV 파일 저장 완료: {filename}")
-            return filename
-
-        except Exception as e:
-            print(f"❌ CSV 저장 실패: {e}")
-            return None
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = filename or f"results/전북도민일보_전체_{timestamp}.csv"
+        with open(filename, "w", newline="", encoding="utf-8-sig") as csvfile:
+            fieldnames = ["언론사", "제목", "날짜", "카테고리", "기자명", "본문"]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for art in all_articles:
+                writer.writerow(art)
+        print(f"📄 CSV 파일 저장 완료: {filename}")
+        return filename
 
     def test_connection(self):
         """도메인 연결 테스트"""
@@ -297,66 +225,17 @@ class DominRSSCollector:
 
 
 def main():
-    """메인 실행 함수"""
     collector = DominRSSCollector()
-
-    print("📰 전북도민일보 RSS 수집기")
-    print("=" * 50)
-    print("사용 가능한 카테고리:")
-
-    # 카테고리를 종류별로 그룹화해서 보기 좋게 표시
-    general_categories = ["전체기사", "헤드라인기사", "주요기사"]
-    region_categories = [cat for cat in collector.rss_categories.keys() if cat not in general_categories]
-
-    print("\n🗞️  일반 카테고리:")
-    for i, category in enumerate(general_categories, 1):
-        print(f"{i:2d}. {category}")
-
-    print("\n🏘️  지역별 카테고리:")
-    for i, category in enumerate(region_categories, len(general_categories) + 1):
-        print(f"{i:2d}. {category}")
-
-    print("=" * 50)
-
-    # 사용자 선택
-    choice = input("\n수집할 카테고리를 선택하세요 (번호 입력, 전체는 'all'): ").strip()
-
-    all_category_list = general_categories + region_categories
-
-    if choice.lower() == "all":
-        selected_categories = all_category_list
-        print("🔄 모든 카테고리를 수집합니다.")
+    all_articles = []
+    for category, rss_file in collector.rss_categories.items():
+        articles = collector.collect_rss_feed(category, rss_file)
+        all_articles.extend(articles)
+        time.sleep(random.uniform(1.0, 2.0))
+    if all_articles:
+        saved = collector.save_to_csv(all_articles)
+        print(f"✅ 전북도민일보 전체 {len(all_articles)}개 수집 완료, 파일: {saved}")
     else:
-        try:
-            if "," in choice:
-                # 여러 카테고리 선택
-                indices = [int(x.strip()) - 1 for x in choice.split(",")]
-                selected_categories = [all_category_list[i] for i in indices if 0 <= i < len(all_category_list)]
-                print(f"🔄 선택된 카테고리: {', '.join(selected_categories)}")
-            else:
-                # 단일 카테고리 선택
-                index = int(choice) - 1
-                if 0 <= index < len(all_category_list):
-                    selected_categories = [all_category_list[index]]
-                    print(f"🔄 선택된 카테고리: {selected_categories[0]}")
-                else:
-                    print("❌ 잘못된 번호입니다.")
-                    return
-        except ValueError:
-            print("❌ 올바른 번호를 입력해주세요.")
-            return
-
-    # RSS 수집 실행
-    articles = collector.collect_all_categories(selected_categories)
-
-    if articles:
-        print(f"\n🎉 전북도민일보 RSS 수집이 완료되었습니다!")
-        print(f"📈 총 {len(articles)}개의 기사를 수집했습니다.")
-        print(f"📍 지역언론 특성: 전북특별자치도 전 지역 뉴스 커버")
-        print(f"🏘️  지역별 섹션: 전주, 군산, 익산 등 14개 시군별 뉴스 제공")
-    else:
-        print("\n❌ 수집된 기사가 없습니다.")
-        print("💡 도메인 주소나 네트워크 연결을 확인해주세요.")
+        print("❌ 수집된 기사가 없습니다.")
 
 
 if __name__ == "__main__":

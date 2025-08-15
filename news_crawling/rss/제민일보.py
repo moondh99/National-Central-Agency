@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-제민일보 RSS 수집기
-Created: 2025년 8월
-Description: 제민일보(www.jemin.com)의 RSS 피드를 수집하여 CSV 파일로 저장
-"""
-
 import feedparser
 import requests
 from bs4 import BeautifulSoup
@@ -30,19 +21,14 @@ class JeminRSSCollector:
         # 제민일보 RSS 피드 카테고리 (이미지에서 확인한 정확한 구조)
         self.rss_categories = {
             "전체기사": "allArticle.xml",
-            "인기기사": "clickTop.xml",
             "제민방송": "S1N1.xml",
             "정치": "S1N2.xml",
             "경제": "S1N3.xml",
             "사회": "S1N4.xml",
             "교육": "S1N5.xml",
-            "스포츠": "S1N6.xml",
             "기획": "S1N7.xml",
             "오피니언": "S1N8.xml",
             "문화": "S1N9.xml",
-            "일과사람들": "S1N10.xml",
-            "코리안뉴스": "S1N14.xml",
-            "핫뉴스": "S1N15.xml",
             "지역뉴스": "S1N16.xml",
         }
 
@@ -138,7 +124,7 @@ class JeminRSSCollector:
 
             articles = []
 
-            for entry in feed.entries:
+            for entry in feed.entries[:20]:
                 try:
                     # 기본 정보 추출
                     title = self.clean_text(entry.title)
@@ -171,18 +157,24 @@ class JeminRSSCollector:
                     elif hasattr(entry, "description"):
                         summary = self.clean_text(entry.description)
 
-                    # 작성자 정보 (RSS에서 먼저 확인)
-                    reporter = "정보수집중"
+                    # 본문 추출 (원문 페이지에서)
+                    try:
+                        page_resp = self.session.get(link, headers=headers, timeout=10)
+                        page_resp.raise_for_status()
+                        page_soup = BeautifulSoup(page_resp.content, "html.parser")
+                        article_div = page_soup.find("article", id="article-view-content-div")
+                        if article_div:
+                            paragraphs = article_div.find_all("p")
+                            full_texts = [self.clean_text(p.get_text()) for p in paragraphs]
+                            summary = "\n".join(full_texts)
+                    except Exception:
+                        pass
+
+                    # 작성자 정보: RSS author 사용, 없으면 정보없음
                     if hasattr(entry, "author") and entry.author:
-                        reporter = self.clean_text(entry.author)
-                        # '제민일보'인 경우 공식 기사로 처리
-                        if "제민일보" in reporter:
-                            reporter = "제민일보"
+                        reporter = self.clean_text(entry.author).replace(" 기자", "")
                     else:
-                        # RSS에 작성자 정보가 없으면 기사에서 추출 (선택적)
-                        if len(articles) < 3:  # 처음 3개 기사만 기자명 추출
-                            reporter = self.extract_reporter_name(link)
-                            time.sleep(random.uniform(0.5, 1.0))  # 요청 간격
+                        reporter = "정보없음"
 
                     article_data = {
                         "category": category_name,
@@ -211,16 +203,24 @@ class JeminRSSCollector:
         """수집된 기사들을 CSV 파일로 저장"""
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"results/제민일보_RSS_{timestamp}.csv"
+            filename = f"results/제민일보_전체_{timestamp}.csv"
 
         try:
             with open(filename, "w", newline="", encoding="utf-8-sig") as csvfile:
-                fieldnames = ["category", "title", "link", "published", "summary", "reporter", "collected_at"]
+                fieldnames = ["언론사", "제목", "날짜", "카테고리", "기자명", "본문"]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
                 writer.writeheader()
                 for article in all_articles:
-                    writer.writerow(article)
+                    row = {
+                        "언론사": "제민일보",
+                        "제목": article.get("title", ""),
+                        "날짜": article.get("published", ""),
+                        "카테고리": article.get("category", ""),
+                        "기자명": article.get("reporter", ""),
+                        "본문": article.get("summary", ""),
+                    }
+                    writer.writerow(row)
 
             print(f"📄 CSV 파일 저장 완료: {filename}")
             return filename
@@ -283,76 +283,10 @@ class JeminRSSCollector:
 def main():
     """메인 실행 함수"""
     collector = JeminRSSCollector()
-
-    print("📰 제민일보 RSS 수집기")
-    print("=" * 50)
-    print("사용 가능한 카테고리:")
-
-    # 카테고리를 종류별로 그룹화해서 보기 좋게 표시
-    general_categories = ["전체기사", "인기기사", "제민방송"]
-    news_categories = ["정치", "경제", "사회", "교육", "스포츠"]
-    special_categories = ["기획", "오피니언", "문화", "일과사람들"]
-    regional_categories = ["코리안뉴스", "핫뉴스", "지역뉴스"]
-
-    print("\n🗞️  일반 카테고리:")
-    for i, category in enumerate(general_categories, 1):
-        print(f"{i:2d}. {category}")
-
-    print("\n📰 뉴스 카테고리:")
-    for i, category in enumerate(news_categories, len(general_categories) + 1):
-        print(f"{i:2d}. {category}")
-
-    print("\n📝 전문 카테고리:")
-    start_idx = len(general_categories) + len(news_categories) + 1
-    for i, category in enumerate(special_categories, start_idx):
-        print(f"{i:2d}. {category}")
-
-    print("\n🌏 지역 카테고리:")
-    start_idx = len(general_categories) + len(news_categories) + len(special_categories) + 1
-    for i, category in enumerate(regional_categories, start_idx):
-        print(f"{i:2d}. {category}")
-
-    print("=" * 50)
-
-    # 사용자 선택
-    choice = input("\n수집할 카테고리를 선택하세요 (번호 입력, 전체는 'all'): ").strip()
-
-    all_category_list = general_categories + news_categories + special_categories + regional_categories
-
-    if choice.lower() == "all":
-        selected_categories = all_category_list
-        print("🔄 모든 카테고리를 수집합니다.")
-    else:
-        try:
-            if "," in choice:
-                # 여러 카테고리 선택
-                indices = [int(x.strip()) - 1 for x in choice.split(",")]
-                selected_categories = [all_category_list[i] for i in indices if 0 <= i < len(all_category_list)]
-                print(f"🔄 선택된 카테고리: {', '.join(selected_categories)}")
-            else:
-                # 단일 카테고리 선택
-                index = int(choice) - 1
-                if 0 <= index < len(all_category_list):
-                    selected_categories = [all_category_list[index]]
-                    print(f"🔄 선택된 카테고리: {selected_categories[0]}")
-                else:
-                    print("❌ 잘못된 번호입니다.")
-                    return
-        except ValueError:
-            print("❌ 올바른 번호를 입력해주세요.")
-            return
-
-    # RSS 수집 실행
-    articles = collector.collect_all_categories(selected_categories)
-
+    print("📰 제민일보 RSS 자동 수집기 (각 카테고리 20개씩)")
+    articles = collector.collect_all_categories()
     if articles:
-        print(f"\n🎉 제민일보 RSS 수집이 완료되었습니다!")
-        print(f"📈 총 {len(articles)}개의 기사를 수집했습니다.")
-        print(f"🏝️  제주 특성: 제주특별자치도 대표 언론사의 다양한 분야 뉴스")
-        print(f"📺 특별 섹션: 제민방송, 코리안뉴스 등 독특한 콘텐츠 제공")
-    else:
-        print("\n❌ 수집된 기사가 없습니다.")
-        print("💡 도메인 주소나 네트워크 연결을 확인해주세요.")
+        print(f"\n🎉 제민일보 RSS 수집이 완료되었습니다! 총 {len(articles)}개의 기사를 수집했습니다.")
 
 
 if __name__ == "__main__":

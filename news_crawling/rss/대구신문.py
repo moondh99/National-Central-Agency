@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-대구신문 RSS 수집기
-Created: 2025년 8월
-Description: 대구신문(www.idaegu.co.kr)의 RSS 피드를 수집하여 CSV 파일로 저장
-"""
-
 import feedparser
 import requests
 from bs4 import BeautifulSoup
@@ -125,6 +116,8 @@ class DaeguShinmunRSSCollector:
             articles = []
 
             for entry in feed.entries:
+                if len(articles) >= 20:
+                    break
                 try:
                     # 기본 정보 추출
                     title = self.clean_text(entry.title)
@@ -144,12 +137,21 @@ class DaeguShinmunRSSCollector:
                     summary = ""
                     if hasattr(entry, "summary"):
                         summary = self.clean_text(entry.summary)
+                    try:
+                        # 본문 추출: 지정된 xpath 이용
+                        resp = self.session.get(link, headers=headers, timeout=15)
+                        resp.raise_for_status()
+                        article_soup = BeautifulSoup(resp.content, "html.parser")
+                        content_elem = article_soup.select_one(
+                            "body > div:nth-of-type(2) > div > div:nth-of-type(1) > main > div:nth-of-type(4) > div > section > article > div:nth-of-type(1) > div > article:nth-of-type(1) > div > div > font"
+                        )
+                        if content_elem:
+                            summary = self.clean_text(content_elem.get_text())
+                    except Exception as e:
+                        print(f"본문 추출 오류 ({link}): {e}")
 
-                    # 기자명 추출 (속도를 위해 선택적으로 실행)
-                    reporter = "정보수집중"
-                    if len(articles) < 5:  # 처음 5개 기사만 기자명 추출
-                        reporter = self.extract_reporter_name(link)
-                        time.sleep(random.uniform(0.5, 1.0))  # 요청 간격
+                    # 기자명 추출 (rss의 author 부분 사용)
+                    reporter = self.clean_text(entry.author) if "author" in entry else "정보없음"
 
                     article_data = {
                         "category": category_name,
@@ -175,19 +177,28 @@ class DaeguShinmunRSSCollector:
             return []
 
     def save_to_csv(self, all_articles, filename=None):
-        """수집된 기사들을 CSV 파일로 저장"""
+        """수집된 기사들을 CSV 파일로 저장 (언론사, 제목, 날짜, 카테고리, 기자명, 본문 순)"""
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"results/대구신문_RSS_{timestamp}.csv"
+            filename = f"results/대구신문_전체_{timestamp}.csv"
 
         try:
             with open(filename, "w", newline="", encoding="utf-8-sig") as csvfile:
-                fieldnames = ["category", "title", "link", "published", "summary", "reporter", "collected_at"]
+                fieldnames = ["언론사", "제목", "날짜", "카테고리", "기자명", "본문"]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
                 writer.writeheader()
                 for article in all_articles:
-                    writer.writerow(article)
+                    writer.writerow(
+                        {
+                            "언론사": "대구신문",
+                            "제목": article.get("title", ""),
+                            "날짜": article.get("published", ""),
+                            "카테고리": article.get("category", ""),
+                            "기자명": article.get("reporter", ""),
+                            "본문": article.get("summary", ""),
+                        }
+                    )
 
             print(f"📄 CSV 파일 저장 완료: {filename}")
             return filename
@@ -232,40 +243,11 @@ def main():
     """메인 실행 함수"""
     collector = DaeguShinmunRSSCollector()
 
-    print("대구신문 RSS 수집기")
-    print("=" * 30)
-    print("사용 가능한 카테고리:")
-    for i, category in enumerate(collector.rss_categories.keys(), 1):
-        print(f"{i:2d}. {category}")
-    print("=" * 30)
+    # 고정된 카테고리 목록 설정
+    selected_categories = ["전체기사", "정치", "경제", "사회", "경북", "문화", "오피니언"]
+    print("🔄 다음 카테고리를 수집합니다: " + ", ".join(selected_categories))
 
-    # 사용자 선택
-    choice = input("\n수집할 카테고리를 선택하세요 (번호 입력, 전체는 'all'): ").strip()
-
-    if choice.lower() == "all":
-        selected_categories = list(collector.rss_categories.keys())
-        print("🔄 모든 카테고리를 수집합니다.")
-    else:
-        try:
-            if "," in choice:
-                # 여러 카테고리 선택
-                indices = [int(x.strip()) - 1 for x in choice.split(",")]
-                selected_categories = [
-                    list(collector.rss_categories.keys())[i] for i in indices if 0 <= i < len(collector.rss_categories)
-                ]
-            else:
-                # 단일 카테고리 선택
-                index = int(choice) - 1
-                if 0 <= index < len(collector.rss_categories):
-                    selected_categories = [list(collector.rss_categories.keys())[index]]
-                else:
-                    print("❌ 잘못된 번호입니다.")
-                    return
-        except ValueError:
-            print("❌ 올바른 번호를 입력해주세요.")
-            return
-
-    # RSS 수집 실행
+    # 각 카테고리당 최대 20개씩 수집
     articles = collector.collect_all_categories(selected_categories)
 
     if articles:

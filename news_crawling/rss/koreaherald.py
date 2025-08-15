@@ -17,10 +17,8 @@ class KoreaHeraldRSSCollector:
             "National": "https://www.koreaherald.com/rss/kh_National",
             "Business": "https://www.koreaherald.com/rss/kh_Business",
             "Life & Culture": "https://www.koreaherald.com/rss/kh_LifenCulture",
-            "Sports": "https://www.koreaherald.com/rss/kh_Sports",
             "World": "https://www.koreaherald.com/rss/kh_World",
             "Opinion": "https://www.koreaherald.com/rss/kh_Opinion",
-            "K-pop": "https://www.koreaherald.com/rss/kh_Kpop",
         }
 
         # 대체 모바일 RSS URL (필요시 사용)
@@ -29,10 +27,8 @@ class KoreaHeraldRSSCollector:
             "National": "https://m.koreaherald.com/rss/kh_National",
             "Business": "https://m.koreaherald.com/rss/kh_Business",
             "Life & Culture": "https://m.koreaherald.com/rss/kh_LifenCulture",
-            "Sports": "https://m.koreaherald.com/rss/kh_Sports",
             "World": "https://m.koreaherald.com/rss/kh_World",
             "Opinion": "https://m.koreaherald.com/rss/kh_Opinion",
-            "K-pop": "https://m.koreaherald.com/rss/kh_Kpop",
         }
 
         # User-Agent 리스트 (랜덤 선택용)
@@ -108,6 +104,11 @@ class KoreaHeraldRSSCollector:
 
             # 기사 본문 추출 (Korea Herald의 본문 구조에 맞게)
             content_selectors = [
+                # original Korea Herald article container
+                "#articleText",
+                "article#articleText",
+                ".news_content.article-view.article-body",
+                # existing selectors
                 "article .article-content",
                 ".article-content",
                 ".news-content",
@@ -130,14 +131,14 @@ class KoreaHeraldRSSCollector:
                     break
 
             if not content:
-                # 대체 방법: p 태그들에서 본문 추출
+                # 대체 방법: p 태그들에서 본문 전체 추출
                 paragraphs = soup.find_all("p")
                 content_list = []
                 for p in paragraphs:
                     text = p.get_text(strip=True)
                     if len(text) > 30:  # 충분한 길이의 텍스트만
                         content_list.append(text)
-                content = " ".join(content_list[:12])  # 처음 12개 문단만
+                content = " ".join(content_list)  # 모든 문단 합치기
 
             # 기자명 추출
             reporter = ""
@@ -192,12 +193,12 @@ class KoreaHeraldRSSCollector:
                 return articles
 
             feed = feedparser.parse(response.content)
-
-            if not feed.entries:
-                print(f"RSS 피드가 비어있습니다: {rss_url}")
+            # 제한: 최대 20개 항목만 처리
+            entries = feed.entries[:20] if hasattr(feed, "entries") else []
+            if not entries:
+                print(f"RSS 피드가 비어있습니다 또는 항목이 없습니다: {rss_url}")
                 return articles
-
-            for entry in feed.entries:
+            for entry in entries:
                 try:
                     # 기본 정보 추출
                     title = self.clean_text(entry.get("title", ""))
@@ -268,28 +269,28 @@ class KoreaHeraldRSSCollector:
 
     def save_to_csv(self, articles, filename):
         """CSV 파일로 저장"""
+        # 저장할 기사 변환 및 열 구성
         if not articles:
             print("저장할 기사가 없습니다.")
             return
-
-        fieldnames = [
-            "category",
-            "title",
-            "link",
-            "description",
-            "content",
-            "reporter",
-            "author",
-            "pub_date",
-            "collected_at",
-        ]
-
+        rows = []
+        for art in articles:
+            rows.append(
+                {
+                    "언론사": "The Korea Herald",
+                    "제목": art.get("title", ""),
+                    "날짜": art.get("pub_date", ""),
+                    "카테고리": art.get("category", ""),
+                    "기자명": "The Korea Herald",
+                    "본문": art.get("content", ""),
+                }
+            )
+        fieldnames = ["언론사", "제목", "날짜", "카테고리", "기자명", "본문"]
         with open(filename, "w", newline="", encoding="utf-8-sig") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
-            writer.writerows(articles)
-
-        print(f"\n총 {len(articles)}개 기사가 {filename}에 저장되었습니다.")
+            writer.writerows(rows)
+        print(f"\n총 {len(rows)}개 기사가 {filename}에 저장되었습니다.")
 
     def run_collection(self, selected_categories=None, use_mobile=False):
         """전체 수집 실행"""
@@ -297,10 +298,9 @@ class KoreaHeraldRSSCollector:
         print("Korea Herald RSS 뉴스 수집기")
         print("=" * 60)
 
-        # 카테고리 선택
+        # 카테고리 선택: 지정되지 않은 경우 모든 RSS 피드 카테고리 사용
         if selected_categories is None:
-            # 기본적으로 주요 카테고리만 수집
-            selected_categories = ["National", "Business", "Life & Culture", "Sports", "World", "K-pop", "Opinion"]
+            selected_categories = list(self.rss_feeds.keys())
 
         all_articles = []
 
@@ -317,7 +317,7 @@ class KoreaHeraldRSSCollector:
         # 결과 저장
         if all_articles:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"results/koreaherald_news_{timestamp}.csv"
+            filename = f"results/The_Korea_Herald_전체_{timestamp}.csv"
             self.save_to_csv(all_articles, filename)
 
             # 수집 결과 요약
@@ -345,15 +345,6 @@ def main():
 
     # 사용 예시 1: 기본 카테고리 수집
     collector.run_collection()
-
-    # 사용 예시 2: 모바일 RSS 사용
-    # collector.run_collection(use_mobile=True)
-
-    # 사용 예시 3: 특정 카테고리만 수집
-    # collector.run_collection(['National', 'Business', 'K-pop'])
-
-    # 사용 예시 4: 모든 카테고리 수집
-    # collector.run_collection(list(collector.rss_feeds.keys()))
 
 
 if __name__ == "__main__":

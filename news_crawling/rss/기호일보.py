@@ -1,295 +1,250 @@
-import feedparser
 import requests
+import feedparser
+import pandas as pd
 from bs4 import BeautifulSoup
-import csv
-import re
-import time
-import random
 from datetime import datetime
-import logging
+import os
+import time
+from urllib.parse import urljoin
 
-class KihoilboRSSCollector:
-    def __init__(self):
-        self.base_url = "https://www.kihoilbo.co.kr"
-        self.rss_urls = {
-            "인기기사": "https://www.kihoilbo.co.kr/rss/clickTop.xml",
-            "정치": "https://www.kihoilbo.co.kr/rss/S1N2.xml",
-            "경제": "https://www.kihoilbo.co.kr/rss/S1N3.xml",
-            "사회": "https://www.kihoilbo.co.kr/rss/S1N4.xml",
-            "문화": "https://www.kihoilbo.co.kr/rss/S1N5.xml",
-            "교육": "https://www.kihoilbo.co.kr/rss/S1N6.xml",
-            "지역": "https://www.kihoilbo.co.kr/rss/S1N7.xml",
-            "스포츠": "https://www.kihoilbo.co.kr/rss/S1N8.xml",
-            "종합": "https://www.kihoilbo.co.kr/rss/S1N10.xml",
-            "오피니언": "https://www.kihoilbo.co.kr/rss/S1N11.xml"
-        }
-        
-        # User-Agent 리스트 (랜덤 선택용)
-        self.user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0'
-        ]
-        
-        # 로깅 설정
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('kihoilbo_rss.log', encoding='utf-8'),
-                logging.StreamHandler()
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
+# RSS URL 매핑 딕셔너리 (9개 카테고리)
+rss_urls = {
+    "전체기사": "https://www.kihoilbo.co.kr/rss/allArticle.xml",
+    "정치": "https://www.kihoilbo.co.kr/rss/clickTop.xml",
+    "경제": "https://www.kihoilbo.co.kr/rss/S1N2.xml",
+    "사회": "https://www.kihoilbo.co.kr/rss/S1N4.xml",
+    "문화": "https://www.kihoilbo.co.kr/rss/S1N5.xml",
+    "교육": "https://www.kihoilbo.co.kr/rss/S1N6.xml",
+    "지역": "https://www.kihoilbo.co.kr/rss/S1N7.xml",
+    "종합": "https://www.kihoilbo.co.kr/rss/S1N8.xml",
+    "오피니언": "https://www.kihoilbo.co.kr/rss/S1N11.xml",
+}
 
-    def get_random_headers(self):
-        """랜덤 User-Agent가 포함된 헤더 반환"""
-        return {
-            'User-Agent': random.choice(self.user_agents),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ko-KR,ko;q=0.8,en-US;q=0.5,en;q=0.3',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
 
-    def extract_article_content(self, article_url):
-        """기사 본문과 기자 정보 추출"""
-        try:
-            response = requests.get(article_url, headers=self.get_random_headers(), timeout=10)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # 기호일보의 기사 본문 구조 파악
-            content = ""
-            reporter = ""
-            
-            # 전체 페이지 텍스트 가져오기
-            page_text = soup.get_text()
-            
-            # 기자 정보 추출 (기호일보 구조: "박태영 기자 pty@kihoilbo.co.kr")
-            reporter_patterns = [
-                r'([가-힣]{2,4})\s*기자\s+([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
-                r'([가-힣]{2,4})\s*기자',
-                r'기자\s+([가-힣]{2,4})',
-                r'([가-힣]{2,4})\s*특파원'
-            ]
-            
-            for pattern in reporter_patterns:
-                match = re.search(pattern, page_text)
-                if match:
-                    reporter = match.group(1)
-                    break
-            
-            # 본문 추출 - 기호일보의 구조에 맞게
-            lines = page_text.split('\n')
-            content_lines = []
-            start_collecting = False
-            
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # 실제 기사 본문 시작점 찾기
-                if not start_collecting:
-                    # 기사 본문 시작을 나타내는 패턴들
-                    if (re.search(r'국민의힘.*전당대회', line) or
-                        re.search(r'당.*후보.*등록.*마감.*후.*첫.*주말', line) or
-                        len(line) > 30):  # 충분한 길이의 문장
-                        start_collecting = True
-                        content_lines.append(line)
-                else:
-                    # 기자 정보나 저작권 정보 나오면 중단
-                    if (re.search(r'([가-힣]{2,4})\s*기자.*@kihoilbo\.co\.kr', line) or
-                        re.search(r'기호일보.*아침을.*여는.*신문.*KIHOILBO', line) or
-                        re.search(r'저작권자.*기호일보', line)):
-                        break
-                    content_lines.append(line)
-            
-            content = ' '.join(content_lines)
-            
-            # 텍스트 정제
-            content = re.sub(r'\s+', ' ', content)  # 연속된 공백 정리
-            
-            # 불필요한 텍스트 제거
-            unwanted_patterns = [
-                r'기호일보.*아침을.*여는.*신문.*KIHOILBO',
-                r'저작권자.*기호일보',
-                r'^\s*기호일보\s*$'
-            ]
-            
-            for pattern in unwanted_patterns:
-                content = re.sub(pattern, '', content, flags=re.IGNORECASE | re.MULTILINE)
-            
-            content = content.strip()
-            
-            return content, reporter
-            
-        except Exception as e:
-            self.logger.error(f"기사 내용 추출 실패 - {article_url}: {str(e)}")
-            return "", ""
+def parse_rss_feed(url, category, max_articles=20):
+    """
+    RSS 피드에서 기사 정보를 파싱하는 함수
 
-    def collect_rss_data(self, category="인기기사", max_articles=50):
-        """RSS 데이터 수집"""
-        rss_url = self.rss_urls.get(category, self.rss_urls["인기기사"])
-        self.logger.info(f"RSS 수집 시작: {category} - {rss_url}")
-        
-        try:
-            # RSS 피드 파싱
-            feed = feedparser.parse(rss_url)
-            
-            if not feed.entries:
-                self.logger.warning(f"RSS 피드에서 데이터를 찾을 수 없습니다: {rss_url}")
-                return []
-            
-            articles = []
-            
-            for i, entry in enumerate(feed.entries[:max_articles]):
-                try:
-                    self.logger.info(f"기사 처리 중 {i+1}/{min(len(feed.entries), max_articles)}: {entry.title}")
-                    
-                    # 기본 정보 추출
-                    title = entry.title if hasattr(entry, 'title') else ""
-                    link = entry.link if hasattr(entry, 'link') else ""
-                    
-                    # RSS에서 기자명 추출 (기호일보는 RSS에 author 정보 포함)
-                    rss_reporter = ""
-                    if hasattr(entry, 'author') and entry.author:
-                        # "박태영 기자" 형태에서 기자명만 추출
-                        author_match = re.search(r'([가-힣]{2,4})\s*기자', entry.author)
-                        if author_match:
-                            rss_reporter = author_match.group(1)
-                        else:
-                            rss_reporter = entry.author
-                    
-                    # 발행일 처리
-                    pub_date = ""
-                    if hasattr(entry, 'published'):
-                        try:
-                            pub_date = entry.published
-                        except:
-                            pub_date = ""
-                    
-                    # 기사 본문 및 추가 기자 정보 추출
-                    content, content_reporter = self.extract_article_content(link)
-                    
-                    # 기자명 결정 (RSS 우선, 본문 보조)
-                    reporter = rss_reporter if rss_reporter else content_reporter
-                    
-                    # 요약 (첫 200자)
-                    summary = content[:200] + "..." if len(content) > 200 else content
-                    
-                    article_data = {
-                        'category': category,
-                        'title': title,
-                        'link': link,
-                        'pub_date': pub_date,
-                        'reporter': reporter,
-                        'summary': summary,
-                        'content': content,
-                        'collected_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    }
-                    
-                    articles.append(article_data)
-                    
-                    # 요청 간격 조절 (서버 부하 방지)
-                    time.sleep(random.uniform(1, 3))
-                    
-                except Exception as e:
-                    self.logger.error(f"개별 기사 처리 실패: {str(e)}")
-                    continue
-            
-            self.logger.info(f"RSS 데이터 수집 완료: {len(articles)}개 기사")
+    Args:
+        url (str): RSS 피드 URL
+        category (str): 카테고리명
+        max_articles (int): 최대 수집할 기사 수
+
+    Returns:
+        list: 기사 정보가 담긴 딕셔너리 리스트
+    """
+    articles = []
+
+    try:
+        # RSS 피드 파싱
+        feed = feedparser.parse(url)
+
+        if not feed.entries:
+            print(f"[경고] {category} 카테고리에서 기사를 찾을 수 없습니다.")
             return articles
-            
-        except Exception as e:
-            self.logger.error(f"RSS 피드 파싱 실패: {str(e)}")
-            return []
 
-    def save_to_csv(self, articles, filename=None):
-        """CSV 파일로 저장"""
-        if not articles:
-            self.logger.warning("저장할 기사가 없습니다.")
-            return
-        
-        if filename is None:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f'results/kihoilbo_articles_{timestamp}.csv'
-        
+        for entry in feed.entries[:max_articles]:
+            article_data = {
+                "언론사": "키호일보",
+                "제목": entry.get("title", "제목 없음"),
+                "날짜": entry.get("published", "날짜 없음"),
+                "카테고리": category,
+                "기자명": entry.get("author", "기자명 없음"),
+                "링크": entry.get("link", ""),
+            }
+            articles.append(article_data)
+
+        print(f"[완료] {category} 카테고리: {len(articles)}개 기사 수집")
+
+    except Exception as e:
+        print(f"[오류] {category} RSS 파싱 중 오류 발생: {str(e)}")
+
+    return articles
+
+
+def extract_article_content(url, max_retries=3):
+    """
+    기사 URL에서 본문을 추출하는 함수
+
+    Args:
+        url (str): 기사 URL
+        max_retries (int): 최대 재시도 횟수
+
+    Returns:
+        str: 추출된 본문 내용
+    """
+    if not url:
+        return "URL 없음"
+
+    for attempt in range(max_retries):
         try:
-            with open(filename, 'w', newline='', encoding='utf-8-sig') as csvfile:
-                fieldnames = ['category', 'title', 'link', 'pub_date', 'reporter', 'summary', 'content', 'collected_date']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                
-                writer.writeheader()
-                for article in articles:
-                    writer.writerow(article)
-            
-            self.logger.info(f"CSV 파일 저장 완료: {filename}")
-            
+            # 웹페이지 요청
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+
+            response = requests.get(url, headers=headers, timeout=10)
+            response.encoding = "utf-8"
+
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, "html.parser")
+
+                # 지정된 XPath에 해당하는 CSS 선택자로 본문 추출
+                # XPath: /html/body/div[1]/div/div[1]/div/div[1]/section/div[4]/div/section/article/div[2]/div/article[1]
+                # CSS 선택자로 변환
+                content_selectors = [
+                    "body > div:nth-child(1) > div > div:nth-child(1) > div > div:nth-child(1) > section > div:nth-child(4) > div > section > article > div:nth-child(2) > div > article:nth-child(1)",
+                    "article div.article-content",
+                    "div.article-content",
+                    ".article_view",
+                    "#articleText",
+                    ".news_text",
+                ]
+
+                content = ""
+                for selector in content_selectors:
+                    element = soup.select_one(selector)
+                    if element:
+                        content = element.get_text(strip=True)
+                        break
+
+                if not content:
+                    # 대안: p 태그들을 모아서 본문 추출 시도
+                    paragraphs = soup.find_all("p")
+                    content = " ".join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
+
+                return content[:1000] + "..." if len(content) > 1000 else content if content else "본문 추출 실패"
+
+            else:
+                print(f"[경고] HTTP {response.status_code} 오류: {url}")
+
         except Exception as e:
-            self.logger.error(f"CSV 저장 실패: {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(1)  # 1초 대기 후 재시도
+                continue
+            else:
+                print(f"[오류] 본문 추출 실패 ({url}): {str(e)}")
+                return "본문 추출 실패"
 
-    def collect_all_categories(self, max_articles_per_category=30):
-        """모든 카테고리의 기사 수집"""
-        all_articles = []
-        
-        for category in self.rss_urls.keys():
-            self.logger.info(f"카테고리 '{category}' 수집 시작")
-            articles = self.collect_rss_data(category, max_articles_per_category)
+    return "본문 추출 실패"
+
+
+def collect_all_news():
+    """
+    모든 카테고리에서 뉴스를 자동으로 수집하는 메인 함수
+
+    Returns:
+        list: 모든 기사 정보가 담긴 리스트
+    """
+    all_articles = []
+
+    print("키호일보 뉴스 수집을 시작합니다...")
+    print(f"총 {len(rss_urls)}개 카테고리에서 각각 20개씩 수집 예정\n")
+
+    for i, (category, url) in enumerate(rss_urls.items(), 1):
+        print(f"[{i}/{len(rss_urls)}] {category} 카테고리 수집 중...")
+
+        # RSS에서 기사 목록 수집
+        articles = parse_rss_feed(url, category, 20)
+
+        if articles:
+            # 각 기사의 본문 추출
+            for j, article in enumerate(articles, 1):
+                print(f"  - {j}/{len(articles)} 본문 추출 중: {article['제목'][:30]}...")
+
+                # 본문 추출
+                content = extract_article_content(article["링크"])
+                article["본문"] = content
+
+                # 진행률 표시를 위한 짧은 대기
+                if j % 5 == 0:
+                    time.sleep(0.5)
+
             all_articles.extend(articles)
-            
-            # 카테고리 간 대기 시간
-            time.sleep(random.uniform(2, 5))
-        
-        return all_articles
+            print(f"  → {category} 완료: {len(articles)}개 기사 수집\n")
+        else:
+            print(f"  → {category}: 수집된 기사 없음\n")
 
+        # 카테고리 간 대기 (서버 부하 방지)
+        if i < len(rss_urls):
+            time.sleep(1)
+
+    print(f"전체 수집 완료! 총 {len(all_articles)}개 기사 수집됨")
+    return all_articles
+
+
+def save_to_csv(articles):
+    """
+    수집된 기사를 CSV 파일로 저장하는 함수
+
+    Args:
+        articles (list): 기사 정보가 담긴 리스트
+    """
+    # results 디렉토리 생성
+    results_dir = "results"
+    os.makedirs(results_dir, exist_ok=True)
+
+    # 타임스탬프 생성
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"기호일보_전체_{timestamp}.csv"
+    filepath = os.path.join(results_dir, filename)
+
+    # DataFrame 생성 (컬럼 순서: 언론사, 제목, 날짜, 카테고리, 기자명, 본문)
+    df = pd.DataFrame(articles)
+
+    # 컬럼 순서 재정렬
+    column_order = ["언론사", "제목", "날짜", "카테고리", "기자명", "본문"]
+    df = df[column_order]
+
+    # CSV 파일로 저장 (UTF-8 인코딩)
+    df.to_csv(filepath, index=False, encoding="utf-8-sig")
+
+    print(f"✅ CSV 파일 저장 완료!")
+    print(f"파일 경로: {filepath}")
+    print(f"파일 크기: {os.path.getsize(filepath):,} bytes")
+
+    # 결과 요약
+    print(f"\n📊 수집 결과 요약:")
+    print(f"✅ 총 수집 기사 수: {len(df)}개")
+    print(f"✅ 수집 카테고리: {len(df['카테고리'].unique())}개")
+
+    print(f"\n📈 카테고리별 수집 현황:")
+    category_counts = df["카테고리"].value_counts().sort_index()
+    for category, count in category_counts.items():
+        status = "✅" if count >= 15 else "⚠️" if count >= 10 else "❌"
+        print(f"  {status} {category}: {count}개")
+
+    return filepath
+
+
+# 메인 실행 함수
 def main():
-    collector = KihoilboRSSCollector()
-    
-    print("=== 기호일보 RSS 수집기 ===")
-    print("1. 인기기사 수집")
-    print("2. 정치 수집")
-    print("3. 경제 수집")
-    print("4. 사회 수집")
-    print("5. 문화 수집")
-    print("6. 교육 수집")
-    print("7. 지역 수집")
-    print("8. 스포츠 수집")
-    print("9. 종합 수집")
-    print("10. 오피니언 수집")
-    print("11. 모든 카테고리 수집")
-    
-    choice = input("선택하세요 (1-11): ").strip()
-    
-    categories = {
-        "1": "인기기사",
-        "2": "정치",
-        "3": "경제",
-        "4": "사회",
-        "5": "문화",
-        "6": "교육",
-        "7": "지역",
-        "8": "스포츠",
-        "9": "종합",
-        "10": "오피니언"
-    }
-    
-    if choice in categories:
-        articles = collector.collect_rss_data(categories[choice], 50)
-        collector.save_to_csv(articles)
-    elif choice == "11":
-        articles = collector.collect_all_categories(30)
-        collector.save_to_csv(articles)
-    else:
-        print("잘못된 선택입니다.")
-        return
-    
-    print(f"수집 완료: 총 {len(articles)}개 기사")
+    """
+    메인 실행 함수
+    """
+    print("=" * 60)
+    print("🎉 키호일보 뉴스 수집기 시작!")
+    print("=" * 60)
 
+    # 뉴스 수집
+    collected_articles = collect_all_news()
+
+    if collected_articles:
+        # CSV 파일로 저장
+        filepath = save_to_csv(collected_articles)
+
+        print(f"\n📅 수집 완료 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 60)
+
+        return filepath
+    else:
+        print("❌ 수집된 기사가 없습니다.")
+        return None
+
+
+# 프로그램 실행
 if __name__ == "__main__":
+    # 필요한 라이브러리 설치 (처음 실행 시)
+    # pip install feedparser requests beautifulsoup4 pandas lxml
+
     main()

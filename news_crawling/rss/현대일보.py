@@ -6,6 +6,9 @@ from datetime import datetime
 import time
 import random
 import re
+import os
+
+NEWS_OUTLET = "현대일보"
 
 
 class HyundaiIlboRSSCollector:
@@ -13,14 +16,10 @@ class HyundaiIlboRSSCollector:
         self.base_url = "http://www.hyundaiilbo.com"
         self.rss_urls = {
             "전체기사": "http://www.hyundaiilbo.com/rss/allArticle.xml",
-            "인기기사": "http://www.hyundaiilbo.com/rss/clickTop.xml",
             "뉴스": "http://www.hyundaiilbo.com/rss/S1N1.xml",
             "인천·경기": "http://www.hyundaiilbo.com/rss/S1N2.xml",
             "오피니언": "http://www.hyundaiilbo.com/rss/S1N3.xml",
-            "사람들": "http://www.hyundaiilbo.com/rss/S1N4.xml",
-            "포토뉴스": "http://www.hyundaiilbo.com/rss/S1N5.xml",
         }
-
         self.user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
@@ -113,23 +112,66 @@ class HyundaiIlboRSSCollector:
 
             soup = BeautifulSoup(response.content, "html.parser")
 
-            # 기사 본문 추출 (현대일보 구조에 맞춘 선택자)
-            content_selectors = [
-                "div.news-content",
-                "div.article-content",
-                "div.view-content",
-                "div#article-view-content-div",
-                "div.user-content",
-                "div.article_txt",
-                "div.content",
-            ]
-
+            # 1순위: 원문 본문 컨테이너에서 추출
             content = ""
-            for selector in content_selectors:
-                content_elem = soup.select_one(selector)
-                if content_elem:
-                    content = content_elem.get_text()
-                    break
+            container = soup.select_one('div#article-view-content-div[itemprop="articleBody"]')
+            if not container:
+                container = soup.select_one("div#article-view-content-div")
+
+            if container:
+                # 불필요 요소 제거
+                for el in container.find_all(
+                    [
+                        "script",
+                        "style",
+                        "noscript",
+                        "iframe",
+                        "aside",
+                        "nav",
+                        "header",
+                        "footer",
+                        "figure",
+                        "table",
+                        "img",
+                    ]
+                ):
+                    el.decompose()
+                # 편집/저작권/캡션 영역 제거
+                for cls in ["view-copyright", "view-editors", "article-head-sub", "caption"]:
+                    for el in container.select(f".{cls}"):
+                        el.decompose()
+
+                # 문단 기반 수집
+                parts = []
+                for p in container.find_all("p"):
+                    text = p.get_text(" ", strip=True)
+                    if not text:
+                        continue
+                    # 불필요 문구 필터
+                    if any(key in text for key in ["저작권자", "무단전재", "재배포", "다른기사 보기"]):
+                        continue
+                    parts.append(text)
+                if parts:
+                    content = " ".join(parts)
+                else:
+                    content = container.get_text(" ", strip=True)
+            else:
+                # 기사 본문 추출 (현대일보 구조에 맞춘 폴백 선택자)
+                content_selectors = [
+                    "div.news-content",
+                    "div.article-content",
+                    "div.view-content",
+                    "div.user-content",
+                    "div.article_txt",
+                    "div.content",
+                ]
+
+                for selector in content_selectors:
+                    content_elem = soup.select_one(selector)
+                    if content_elem:
+                        content = content_elem.get_text(" ", strip=True)
+                        if content:
+                            break
 
             # 본문이 없으면 전체에서 추출 시도
             if not content:
@@ -137,7 +179,7 @@ class HyundaiIlboRSSCollector:
                 for element in soup(["script", "style", "nav", "header", "footer", "aside"]):
                     element.decompose()
 
-                content = soup.get_text()
+                content = soup.get_text(" ", strip=True)
 
             return self.clean_content(content)
 
@@ -229,6 +271,87 @@ class HyundaiIlboRSSCollector:
 
         return collected_data
 
+    def append_rss_category(self, rss_url: str, category_name: str, writer: csv.DictWriter, max_articles: int = 20):
+        """RSS를 파싱해 지정 writer에 (언론사, 제목, 날짜, 카테고리, 기자명, 본문) 행 추가"""
+        print(f"\n=== {category_name} RSS 수집 시작 ===")
+
+        # RSS 피드 파싱
+        feed = feedparser.parse(rss_url)
+        if not feed.entries:
+            print(f"❌ {category_name}: RSS 피드가 비어있습니다.")
+            return 0, 0
+
+        total = min(len(feed.entries), max_articles)
+        success = 0
+        print(f"📰 {category_name}: {len(feed.entries)}개 기사 발견 (최대 {total}건 처리)")
+
+        for i, entry in enumerate(feed.entries[:max_articles]):
+            try:
+                print(f"처리 중... {i+1}/{total}: {getattr(entry, 'title', '')[:50]}...")
+
+                # 제목
+                title = getattr(entry, "title", "")
+                title = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", title)
+
+                # 링크
+                link = getattr(entry, "link", "")
+
+                # 날짜
+                if hasattr(entry, "published_parsed") and entry.published_parsed:
+                    date = datetime(*entry.published_parsed[:6]).strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    date = getattr(entry, "published", "") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                # 카테고리
+                category = ""
+                if hasattr(entry, "category") and entry.category:
+                    category = entry.category.strip()
+                elif hasattr(entry, "tags") and entry.tags:
+                    try:
+                        category = entry.tags[0].get("term") or entry.tags[0].term
+                    except Exception:
+                        category = ""
+                if not category:
+                    category = category_name
+
+                # 기자명 (RSS author)
+                reporter = getattr(entry, "author", "")
+                if reporter:
+                    reporter = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", str(reporter)).strip()
+                    reporter = re.sub(r"\s*기자\s*$", "", reporter).strip()
+
+                # 본문 (원문 페이지에서 추출)
+                content = self.get_article_content(link) if link else ""
+                if len(content.strip()) < 20:
+                    print(f"    ⚠ 본문이 너무 짧아 건너뜀 (길이: {len(content)})")
+                    continue
+
+                # 기록 (열 순서: 언론사, 제목, 날짜, 카테고리, 기자명, 본문)
+                writer.writerow(
+                    {
+                        "언론사": NEWS_OUTLET,
+                        "제목": title,
+                        "날짜": date,
+                        "카테고리": category if category else "미분류",
+                        "기자명": reporter if reporter else "미상",
+                        "본문": content,
+                    }
+                )
+
+                success += 1
+
+                # 요청 간격 조절
+                time.sleep(random.uniform(0.6, 1.6))
+            except KeyboardInterrupt:
+                print("\n⚠ 사용자가 중단했습니다.")
+                break
+            except Exception as e:
+                print(f"    ❌ 기사 처리 오류: {e}")
+                continue
+
+        print(f"✅ {category_name}: {success}/{total}건 저장")
+        return success, total
+
     def save_to_csv(self, data, filename=None):
         """CSV 파일로 저장"""
         if not data:
@@ -240,6 +363,10 @@ class HyundaiIlboRSSCollector:
             filename = f"results/hyundaiilbo_news_{timestamp}.csv"
 
         try:
+            # 결과 디렉터리 보장
+            out_dir = os.path.dirname(filename)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
             with open(filename, "w", newline="", encoding="utf-8-sig") as csvfile:
                 fieldnames = ["category", "title", "link", "pub_date", "reporter", "summary", "content", "collected_at"]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -271,22 +398,33 @@ def main():
 
     collector = HyundaiIlboRSSCollector()
 
-    # 사용 예시
-    print("📋 수집 가능한 카테고리:")
-    for i, category in enumerate(collector.rss_urls.keys(), 1):
-        print(f"  {i}. {category}")
+    print("\n🚀 전체 카테고리에서 각각 20개 수집을 시작합니다 (단일 CSV 저장)...")
 
-    print("\n🚀 전체 카테고리 수집을 시작합니다...")
+    max_articles = 20
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    output_file = f"results/{NEWS_OUTLET}_전체_{timestamp}.csv"
+    out_dir = os.path.dirname(output_file)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
-    # 전체 카테고리에서 각각 30개씩 수집
-    collected_data = collector.collect_rss_data(max_articles=30)
+    total_success = 0
+    total_expected = 0
 
-    # CSV 저장
-    if collected_data:
-        collector.save_to_csv(collected_data)
-        print(f"\n🎉 수집 완료! 총 {len(collected_data)}개 기사를 수집했습니다.")
-    else:
-        print("\n❌ 수집된 데이터가 없습니다.")
+    with open(output_file, "w", newline="", encoding="utf-8-sig") as csvfile:
+        fieldnames = ["언론사", "제목", "날짜", "카테고리", "기자명", "본문"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for category_name, rss_url in collector.rss_urls.items():
+            success, expected = collector.append_rss_category(rss_url, category_name, writer, max_articles=max_articles)
+            total_success += success
+            total_expected += expected
+            # 카테고리 간 간격
+            time.sleep(random.uniform(1.2, 2.2))
+
+    print(f"\n🎉 수집 완료! CSV 저장: {output_file}")
+    if total_expected:
+        print(f"📊 총합: {total_success}/{total_expected}건 저장")
 
 
 if __name__ == "__main__":

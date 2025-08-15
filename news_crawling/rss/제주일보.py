@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-제주뉴스(제주일보) RSS 수집기
-Created: 2025년 8월
-Description: 제주뉴스(www.jejunews.com)의 RSS 피드를 수집하여 CSV 파일로 저장
-"""
-
 import feedparser
 import requests
 from bs4 import BeautifulSoup
@@ -28,7 +19,7 @@ class JejuNewsRSSCollector:
         ]
 
         # 제주뉴스 RSS 피드 카테고리 (이미지에서 확인한 정확한 구조)
-        self.rss_categories = {"전체기사": "allArticle.xml", "인기기사": "clickTop.xml"}
+        self.rss_categories = {"전체기사": "allArticle.xml"}
 
         self.session = requests.Session()
 
@@ -116,7 +107,7 @@ class JejuNewsRSSCollector:
 
             articles = []
 
-            for entry in feed.entries:
+            for entry in feed.entries[:20]:
                 try:
                     # 기본 정보 추출
                     title = self.clean_text(entry.title)
@@ -149,18 +140,24 @@ class JejuNewsRSSCollector:
                     elif hasattr(entry, "description"):
                         summary = self.clean_text(entry.description)
 
-                    # 작성자 정보 (RSS에서 먼저 확인)
-                    reporter = "정보수집중"
+                    # 본문 추출 (원문 페이지에서)
+                    try:
+                        page_resp = self.session.get(link, headers=headers, timeout=10)
+                        page_resp.raise_for_status()
+                        page_soup = BeautifulSoup(page_resp.content, "html.parser")
+                        content_div = page_soup.find("div", id="article-view-content-div")
+                        if content_div:
+                            paras = content_div.find_all("p")
+                            full_text = [self.clean_text(p.get_text()) for p in paras]
+                            summary = "\n".join(full_text)
+                    except Exception:
+                        pass
+
+                    # 작성자 정보: RSS author 사용, 없으면 정보없음
                     if hasattr(entry, "author") and entry.author:
-                        reporter = self.clean_text(entry.author)
-                        # '제주일보'인 경우 공식 기사로 처리
-                        if "제주일보" in reporter or "제주뉴스" in reporter:
-                            reporter = "제주일보"
+                        reporter = self.clean_text(entry.author).replace(" 기자", "")
                     else:
-                        # RSS에 작성자 정보가 없으면 기사에서 추출 (선택적)
-                        if len(articles) < 5:  # 처음 5개 기사만 기자명 추출
-                            reporter = self.extract_reporter_name(link)
-                            time.sleep(random.uniform(0.5, 1.0))  # 요청 간격
+                        reporter = "정보없음"
 
                     article_data = {
                         "category": category_name,
@@ -189,16 +186,24 @@ class JejuNewsRSSCollector:
         """수집된 기사들을 CSV 파일로 저장"""
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"results/제주뉴스_RSS_{timestamp}.csv"
+            filename = f"results/제주일보_전체_{timestamp}.csv"
 
         try:
             with open(filename, "w", newline="", encoding="utf-8-sig") as csvfile:
-                fieldnames = ["category", "title", "link", "published", "summary", "reporter", "collected_at"]
+                fieldnames = ["언론사", "제목", "날짜", "카테고리", "기자명", "본문"]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
                 writer.writeheader()
                 for article in all_articles:
-                    writer.writerow(article)
+                    row = {
+                        "언론사": "제주일보",
+                        "제목": article.get("title", ""),
+                        "날짜": article.get("published", ""),
+                        "카테고리": article.get("category", ""),
+                        "기자명": article.get("reporter", ""),
+                        "본문": article.get("summary", ""),
+                    }
+                    writer.writerow(row)
 
             print(f"📄 CSV 파일 저장 완료: {filename}")
             return filename
@@ -261,71 +266,13 @@ class JejuNewsRSSCollector:
 def main():
     """메인 실행 함수"""
     collector = JejuNewsRSSCollector()
-
-    print("📰 제주뉴스(제주일보) RSS 수집기")
-    print("=" * 50)
-    print("📝 제주일보의 온라인 뉴스 서비스입니다.")
-    print("🏝️  제주특별자치도 대표 언론사의 최신 뉴스를 수집합니다.")
-    print()
-    print("사용 가능한 카테고리:")
-
-    for i, category in enumerate(collector.rss_categories.keys(), 1):
-        print(f"{i}. {category}")
-
-    print("=" * 50)
-
-    # 사용자 선택
-    choice = input("\n수집할 카테고리를 선택하세요 (번호 입력, 전체는 'all'): ").strip()
-
-    category_list = list(collector.rss_categories.keys())
-
-    if choice.lower() == "all":
-        selected_categories = category_list
-        print("🔄 모든 카테고리를 수집합니다.")
-    else:
-        try:
-            if "," in choice:
-                # 여러 카테고리 선택
-                indices = [int(x.strip()) - 1 for x in choice.split(",")]
-                selected_categories = [category_list[i] for i in indices if 0 <= i < len(category_list)]
-                print(f"🔄 선택된 카테고리: {', '.join(selected_categories)}")
-            else:
-                # 단일 카테고리 선택
-                index = int(choice) - 1
-                if 0 <= index < len(category_list):
-                    selected_categories = [category_list[index]]
-                    print(f"🔄 선택된 카테고리: {selected_categories[0]}")
-                else:
-                    print("❌ 잘못된 번호입니다.")
-                    return
-        except ValueError:
-            print("❌ 올바른 번호를 입력해주세요.")
-            return
-
-    # RSS 수집 실행
-    articles = collector.collect_all_categories(selected_categories)
+    print("📰 제주뉴스 RSS 자동 수집기 (각 카테고리 20개씩)")
+    articles = collector.collect_all_categories()
 
     if articles:
-        print(f"\n🎉 제주뉴스 RSS 수집이 완료되었습니다!")
-        print(f"📈 총 {len(articles)}개의 기사를 수집했습니다.")
-        print(f"🏝️  제주 특성: 제주특별자치도 지역 뉴스 및 사회 이슈")
-        print(f"📰 언론사: 제주일보 (jejunews.com)")
-
-        # 간단한 통계 정보
-        if len(articles) > 0:
-            print(f"📊 수집 통계:")
-            category_counts = {}
-            for article in articles:
-                category = article["category"]
-                category_counts[category] = category_counts.get(category, 0) + 1
-
-            for category, count in category_counts.items():
-                print(f"   - {category}: {count}개")
-
-    else:
-        print("\n❌ 수집된 기사가 없습니다.")
-        print("💡 도메인 주소나 네트워크 연결을 확인해주세요.")
+        print(f"\n🎉 제주뉴스 RSS 수집이 완료되었습니다! 총 {len(articles)}개의 기사를 수집했습니다.")
 
 
+# 실행
 if __name__ == "__main__":
-    main()
+    result_file = main()

@@ -1,6 +1,12 @@
 import feedparser
 import requests
 from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+import os
 import csv
 import time
 import random
@@ -14,16 +20,9 @@ class KoreaTimesRSSCollector:
         self.rss_feeds = {
             "All News": "https://feed.koreatimes.co.kr/k/allnews.xml",
             "Foreign Affairs": "https://feed.koreatimes.co.kr/k/foreignaffairs.xml",
-            "Entertainment": "https://feed.koreatimes.co.kr/k/entertainment.xml",
-            "Opinion": "https://feed.koreatimes.co.kr/k/opinion.xml",
             "South Korea": "https://feed.koreatimes.co.kr/k/southkorea.xml",
-            "Economy": "https://feed.koreatimes.co.kr/k/economy.xml",
             "Business": "https://feed.koreatimes.co.kr/k/business.xml",
-            "Lifestyle": "https://feed.koreatimes.co.kr/k/lifestyle.xml",
-            "Sports": "https://feed.koreatimes.co.kr/k/sports.xml",
             "World": "https://feed.koreatimes.co.kr/k/world.xml",
-            "Video": "https://feed.koreatimes.co.kr/k/video.xml",
-            "Photos": "https://feed.koreatimes.co.kr/k/photos.xml",
         }
 
         # User-Agent 리스트 (랜덤 선택용)
@@ -91,43 +90,57 @@ class KoreaTimesRSSCollector:
     def get_article_content(self, url):
         """개별 기사 본문 추출"""
         try:
-            headers = {"User-Agent": self.get_random_user_agent()}
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            response.encoding = "utf-8"
-
-            soup = BeautifulSoup(response.text, "html.parser")
-
-            # 기사 본문 추출 (Korea Times의 본문 구조에 맞게)
-            content_selectors = [
-                "article .article-content",
-                ".article-content",
-                ".news-content",
-                "#article-content",
-                ".articleCont",
-                ".article_cont",
-                'div[itemprop="articleBody"]',
-                ".article-body",
-                ".content-body",
-                ".story-body",
-            ]
-
-            content = ""
-            for selector in content_selectors:
-                content_element = soup.select_one(selector)
-                if content_element:
-                    content = content_element.get_text(strip=True)
-                    break
-
-            if not content:
-                # 대체 방법: p 태그들에서 본문 추출
-                paragraphs = soup.find_all("p")
-                content_list = []
-                for p in paragraphs:
-                    text = p.get_text(strip=True)
-                    if len(text) > 20:  # 충분한 길이의 텍스트만
-                        content_list.append(text)
-                content = " ".join(content_list[:15])  # 처음 15개 문단만
+            # Selenium 헤드리스 브라우저로 페이지 로드 (경고창 및 로깅 제거)
+            options = Options()
+            options.add_argument("--headless")  # 헤드리스 모드
+            options.add_argument("--disable-gpu")
+            options.add_argument("--disable-infobars")
+            options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+            options.add_experimental_option("useAutomationExtension", False)
+            # 서비스 로그를 /dev/null로 리디렉션하고 ChromeDriverManager로 드라이버 설치
+            service = Service(ChromeDriverManager().install(), log_path=os.devnull)
+            driver = webdriver.Chrome(service=service, options=options)
+            driver.get(url)
+            # 페이지 소스 불러와 항상 soup 생성
+            html = driver.page_source
+            soup = BeautifulSoup(html, "html.parser")
+            # 상대 XPath로 우선 본문 추출
+            elems = driver.find_elements(
+                By.XPATH, "//div[@data-article-content='true']//p[contains(@class,'editor-p')]"
+            )
+            if elems:
+                content = " ".join([el.text.strip() for el in elems if el.text.strip()])
+            else:
+                # CSS selector 대체 본문 추출
+                container = soup.select_one('div[data-article-content="true"]')
+                if container:
+                    paras = container.find_all("p", class_=re.compile(r"editor-p"))
+                    content = " ".join([p.get_text(strip=True) for p in paras if p.get_text(strip=True)])
+                else:
+                    # 기본 selector 사용
+                    content = ""
+                    content_selectors = [
+                        "article .article-content",
+                        ".article-content",
+                        ".news-content",
+                        "#article-content",
+                        ".articleCont",
+                        ".article_cont",
+                        'div[itemprop="articleBody"]',
+                        ".article-body",
+                        ".content-body",
+                        ".story-body",
+                    ]
+                    for sel in content_selectors:
+                        el = soup.select_one(sel)
+                        if el:
+                            content = el.get_text(strip=True)
+                            break
+                if not content:
+                    # 모든 단락 합치기
+                    paras = soup.find_all("p")
+                    content = " ".join([p.get_text(strip=True) for p in paras if len(p.get_text(strip=True)) > 20])
+            driver.quit()
 
             # 기자명 추출
             reporter = ""
@@ -169,7 +182,8 @@ class KoreaTimesRSSCollector:
                 print(f"RSS 피드가 비어있습니다: {rss_url}")
                 return articles
 
-            for entry in feed.entries:
+            # RSS 피드에서 최대 20개 기사만 처리
+            for entry in feed.entries[:20]:
                 try:
                     # 기본 정보 추출
                     title = self.clean_text(entry.get("title", ""))
@@ -189,31 +203,22 @@ class KoreaTimesRSSCollector:
                     except:
                         formatted_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                    # 개별 기사 본문 및 기자명 추출
+                    # 개별 기사 본문 추출
                     if link:
-                        content, reporter = self.get_article_content(link)
+                        content, _ = self.get_article_content(link)
                         time.sleep(random.uniform(0.5, 1.5))  # 요청 간격 조절
                     else:
-                        content, reporter = description, ""
-
-                    # RSS 피드에서 기자명 추출 (author 정보 활용)
-                    if not reporter:
-                        reporter = self.extract_reporter_name("", author)
-
-                    # 본문에서 기자명 재추출
-                    if not reporter:
-                        reporter = self.extract_reporter_name(content)
+                        content = description
+                    # RSS author에서 기자명 추출
+                    reporter = self.extract_reporter_name("", author)
 
                     article_data = {
-                        "category": category,
+                        "source": "KoreaTimes",
                         "title": title,
-                        "link": link,
-                        "description": description,
-                        "content": content,
-                        "reporter": reporter,
-                        "author": author,
                         "pub_date": formatted_date,
-                        "collected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "category": category,
+                        "reporter": reporter,
+                        "content": content,
                     }
 
                     articles.append(article_data)
@@ -234,22 +239,31 @@ class KoreaTimesRSSCollector:
             print("저장할 기사가 없습니다.")
             return
 
+        # 언론사, 제목, 날짜, 카테고리, 기자명, 본문 순서
         fieldnames = [
-            "category",
-            "title",
-            "link",
-            "description",
-            "content",
-            "reporter",
-            "author",
-            "pub_date",
-            "collected_at",
+            "언론사",
+            "제목",
+            "날짜",
+            "카테고리",
+            "기자명",
+            "본문",
         ]
 
         with open(filename, "w", newline="", encoding="utf-8-sig") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(articles)
+            writer = csv.writer(csvfile)
+            # 헤더 기록
+            writer.writerow(fieldnames)
+            # 각 article dict에서 값 순서대로 추출하여 기록
+            for art in articles:
+                row = [
+                    art.get("source", ""),
+                    art.get("title", ""),
+                    art.get("pub_date", ""),
+                    art.get("category", ""),
+                    art.get("reporter", ""),
+                    art.get("content", ""),
+                ]
+                writer.writerow(row)
 
         print(f"\n총 {len(articles)}개 기사가 {filename}에 저장되었습니다.")
 
@@ -259,35 +273,17 @@ class KoreaTimesRSSCollector:
         print("Korea Times RSS 뉴스 수집기")
         print("=" * 60)
 
-        # 카테고리 선택
-        if selected_categories is None:
-            # 기본적으로 주요 카테고리만 수집 (All News는 너무 많으므로 제외)
-            selected_categories = [
-                "South Korea",
-                "Business",
-                "Economy",
-                "Foreign Affairs",
-                "Entertainment",
-                "Sports",
-                "Opinion",
-            ]
-
+        # 모든 RSS 피드 카테고리에 대해 최대 20개 기사 수집
         all_articles = []
-
-        # 선택된 카테고리별 RSS 피드 수집
-        for category in selected_categories:
-            if category in self.rss_feeds:
-                rss_url = self.rss_feeds[category]
-                articles = self.collect_rss_feed(category, rss_url)
-                all_articles.extend(articles)
-                time.sleep(2)  # 카테고리 간 대기시간
-            else:
-                print(f"카테고리를 찾을 수 없습니다: {category}")
+        for category, rss_url in self.rss_feeds.items():
+            articles = self.collect_rss_feed(category, rss_url)
+            all_articles.extend(articles)
+            time.sleep(2)  # 카테고리 간 대기시간
 
         # 결과 저장
         if all_articles:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"results/koreatimes_news_{timestamp}.csv"
+            filename = f"results/KoreaTimes_전체_{timestamp}.csv"
             self.save_to_csv(all_articles, filename)
 
             # 수집 결과 요약
@@ -315,12 +311,6 @@ def main():
 
     # 사용 예시 1: 기본 카테고리 수집
     collector.run_collection()
-
-    # 사용 예시 2: 특정 카테고리만 수집
-    # collector.run_collection(['All News', 'South Korea', 'Business'])
-
-    # 사용 예시 3: 모든 카테고리 수집 (시간이 오래 걸림)
-    # collector.run_collection(list(collector.rss_feeds.keys()))
 
 
 if __name__ == "__main__":

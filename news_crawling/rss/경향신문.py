@@ -1,316 +1,233 @@
 import requests
+import pandas as pd
 import xml.etree.ElementTree as ET
-import csv
-import re
-from datetime import datetime
-from urllib.parse import urljoin
 from bs4 import BeautifulSoup
+import os
+from datetime import datetime
 import time
-import json
+import re
 
-def parse_khan_rss_to_csv():
-    """
-    경향신문 RSS 피드를 파싱하여 제목/날짜/기자명/본문 순으로 CSV 파일에 저장 (개선된 버전)
-    """
-    
-    # 경향신문 RSS URL
-    rss_url = "https://www.khan.co.kr/rss/rssdata/total_news.xml"
-    
-    # CSV 파일명 (현재 날짜 기준)
-    csv_filename = f"results/khan_news_improved_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    
+# RSS URL 매핑 딕셔너리 (9개 카테고리)
+rss_urls = {
+    "전체뉴스": "https://www.khan.co.kr/rss/rssdata/total_news.xml",
+    "정치": "https://www.khan.co.kr/rss/rssdata/politic_news.xml",
+    "경제": "https://www.khan.co.kr/rss/rssdata/economy_news.xml",
+    "사회": "https://www.khan.co.kr/rss/rssdata/society_news.xml",
+    "문화": "https://www.khan.co.kr/rss/rssdata/culture_news.xml",
+    "지역": "https://www.khan.co.kr/rss/rssdata/local_news.xml",
+    "오피니언": "https://www.khan.co.kr/rss/rssdata/opinion_news.xml",
+    "국제": "https://www.khan.co.kr/rss/rssdata/kh_world.xml",
+    "사람": "https://www.khan.co.kr/rss/rssdata/people_news.xml",
+}
+
+
+def parse_rss_feed(rss_url, max_items=20):
+    """RSS 피드를 파싱하여 뉴스 정보를 추출하는 함수"""
     try:
-        # RSS 피드 가져오기
-        print("RSS 피드를 가져오는 중...")
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-        
-        response = requests.get(rss_url, headers=headers, timeout=30)
+        response = requests.get(rss_url, timeout=10)
         response.raise_for_status()
-        
+
         # XML 파싱
         root = ET.fromstring(response.content)
-        
-        # 기사 목록 추출
-        items = root.findall('.//item')
-        print(f"총 {len(items)}개의 기사를 발견했습니다.")
-        
-        # CSV 파일 생성
-        with open(csv_filename, 'w', newline='', encoding='utf-8-sig') as csvfile:
-            writer = csv.writer(csvfile)
-            # 헤더 작성
-            writer.writerow(['제목', '날짜', '기자명', '본문'])
-            
-            for i, item in enumerate(items, 1):
-                try:
-                    # RSS에서 기본 정보 추출
-                    title = item.find('title').text if item.find('title') is not None else ""
-                    link = item.find('link').text if item.find('link') is not None else ""
-                    pub_date = item.find('pubDate').text if item.find('pubDate') is not None else ""
-                    
-                    # CDATA 태그 제거
-                    title = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', title)
-                    
-                    # 날짜 포맷 정리
-                    formatted_date = format_date(pub_date)
-                    
-                    print(f"처리 중: {i}/{len(items)} - {title[:50]}...")
-                    
-                    # 개별 기사 페이지에서 상세 정보 추출
-                    article_content, reporter = get_article_details_improved(link)
-                    
-                    # CSV에 데이터 쓰기
-                    writer.writerow([title, formatted_date, reporter, article_content])
-                    
-                    # 서버 부하 방지를 위한 지연
-                    time.sleep(2)
-                    
-                except Exception as e:
-                    print(f"기사 처리 중 오류 발생: {e}")
-                    # 오류 발생시에도 기본 정보는 저장
-                    writer.writerow([title, formatted_date, "정보없음", "본문 추출 실패"])
-                    continue
-        
-        print(f"CSV 파일이 생성되었습니다: {csv_filename}")
-        return csv_filename
-        
+
+        items = []
+        # item 태그들을 찾아서 처리
+        for item in root.findall(".//item")[:max_items]:
+            # 제목 추출
+            title_elem = item.find("title")
+            title = title_elem.text if title_elem is not None else ""
+            if title.startswith("<![CDATA[") and title.endswith("]]>"):
+                title = title[9:-3].strip()
+
+            # 링크 추출
+            link_elem = item.find("link")
+            link = link_elem.text if link_elem is not None else ""
+
+            # 날짜 추출 (dc:date 또는 pubDate)
+            date_elem = item.find("{http://purl.org/dc/elements/1.1/}date")
+            if date_elem is None:
+                date_elem = item.find("pubDate")
+            date = date_elem.text if date_elem is not None else ""
+
+            # 기자명 추출 (author 태그에서)
+            author_elem = item.find("author")
+            author = author_elem.text if author_elem is not None else ""
+            if author.startswith("<![CDATA[") and author.endswith("]]>"):
+                author = author[9:-3].strip()
+
+            items.append({"title": title, "link": link, "date": date, "author": author})
+
+        return items
+
     except Exception as e:
-        print(f"RSS 파싱 중 오류 발생: {e}")
-        return None
+        print(f"RSS 피드 파싱 오류: {e}")
+        return []
 
-def format_date(date_string):
-    """
-    날짜 문자열을 표준 형식으로 변환
-    """
-    if not date_string:
-        return ""
-    
-    try:
-        # RFC 2822 형식 파싱 시도
-        from email.utils import parsedate_tz
-        import time
-        
-        parsed = parsedate_tz(date_string)
-        if parsed:
-            timestamp = time.mktime(parsed[:9])
-            return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
-    except:
-        pass
-    
-    return date_string
 
-def get_article_details_improved(url):
-    """
-    개별 기사 URL에서 본문과 기자명을 추출 (개선된 버전)
-    """
+def extract_article_content(url):
+    """기사 URL에서 본문 내용을 추출하는 함수"""
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ko-KR,ko;q=0.8,en-US;q=0.5,en;q=0.3',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
-        
-        session = requests.Session()
-        response = session.get(url, headers=headers, timeout=30)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # 본문 추출 (다양한 선택자 시도)
-        content = ""
-        
-        # 경향신문의 다양한 기사 본문 선택자들
-        content_selectors = [
-            'div.art-body',
-            'div#article-body', 
-            'div.article-body',
-            'div.news-body',
-            'div.view-body',
-            '.art-body p',
-            'article .content',
-            'div[data-article-body]'
+
+        soup = BeautifulSoup(response.content, "html.parser")
+
+        # 한국일보에 최적화된 선택자들 (우선순위 순)
+        selectors = [
+            '[class*="content"]',  # 발견된 최적 선택자
+            ".art_txt",
+            "main section:first-child article section div",
+            ".article_txt",
+            ".news_txt",
+            ".content_area",
+            "article p",
         ]
-        
-        for selector in content_selectors:
+
+        for selector in selectors:
             elements = soup.select(selector)
             if elements:
-                content_parts = []
-                for element in elements:
-                    # 광고나 관련기사 등 제거
-                    for unwanted in element.find_all(['script', 'style', 'aside', '.ad', '.related', '.recommend']):
-                        unwanted.decompose()
-                    
-                    # 텍스트 추출
-                    paragraphs = element.find_all(['p', 'div'], recursive=True)
-                    for p in paragraphs:
-                        text = p.get_text(strip=True)
-                        if text and len(text) > 15 and not is_unwanted_content(text):
-                            content_parts.append(text)
-                
-                if content_parts:
-                    content = " ".join(content_parts)
-                    break
-        
-        # 전체 텍스트에서 본문 추출 (마지막 수단)
-        if not content:
-            all_text = soup.get_text()
-            paragraphs = all_text.split('\n')
-            content_parts = []
-            for para in paragraphs:
-                para = para.strip()
-                if len(para) > 30 and not is_unwanted_content(para):
-                    content_parts.append(para)
-            content = " ".join(content_parts[:10])  # 처음 10개 문단만
-        
-        # 기자명 추출 (다양한 방법 시도)
-        reporter = extract_reporter_name(soup, content)
-        
-        # 본문 정리 (너무 길면 자르기)
-        if len(content) > 3000:
-            content = content[:3000] + "..."
-        
-        # HTML 엔티티 디코딩
-        import html
-        content = html.unescape(content)
-        reporter = html.unescape(reporter)
-            
-        return content, reporter
-        
+                # 가장 긴 텍스트를 가진 요소 선택
+                best_content = ""
+                for elem in elements:
+                    text = elem.get_text(strip=True, separator=" ")
+                    if len(text) > len(best_content) and len(text) > 100:  # 충분한 길이
+                        best_content = text
+
+                if best_content:
+                    # 불필요한 공백 정리
+                    content = re.sub(r"\s+", " ", best_content)
+                    return content[:2000]  # 최대 2000자로 제한
+
+        return "본문 추출 실패"
+
     except Exception as e:
-        print(f"기사 상세 정보 추출 오류 ({url}): {e}")
-        return "본문 추출 실패", "정보없음"
+        print(f"본문 추출 오류 ({url}): {e}")
+        return f"본문 추출 오류: {str(e)}"
 
-def extract_reporter_name(soup, content):
-    """
-    기자명 추출을 위한 다양한 방법 시도
-    """
-    reporter = "기자명 없음"
-    
-    # 1. 클래스명으로 기자명 찾기
-    reporter_selectors = [
-        '.writer', '.reporter', '.author', '.byline',
-        '.art-writer', '.news-writer', '.article-writer',
-        '[class*="writer"]', '[class*="reporter"]', '[class*="author"]'
-    ]
-    
-    for selector in reporter_selectors:
-        elements = soup.select(selector)
-        for element in elements:
-            text = element.get_text(strip=True)
-            if text and ('기자' in text or '특파원' in text or '논설위원' in text):
-                reporter = clean_reporter_name(text)
-                return reporter
-    
-    # 2. 메타데이터에서 찾기
-    meta_author = soup.find('meta', {'name': 'author'})
-    if meta_author and meta_author.get('content'):
-        reporter = clean_reporter_name(meta_author['content'])
-        return reporter
-    
-    # 3. JSON-LD 구조화 데이터에서 찾기
-    scripts = soup.find_all('script', type='application/ld+json')
-    for script in scripts:
+
+def collect_news_by_category(category, rss_url, max_items=20):
+    """특정 카테고리의 뉴스를 수집하는 함수"""
+    print(f"\n[{category}] 카테고리 뉴스 수집 중...")
+
+    # RSS 피드에서 뉴스 목록 가져오기
+    rss_items = parse_rss_feed(rss_url, max_items)
+
+    if not rss_items:
+        print(f"[{category}] RSS 피드에서 뉴스를 가져오지 못했습니다.")
+        return []
+
+    collected_news = []
+
+    for i, item in enumerate(rss_items, 1):
+        print(f"[{category}] {i}/{len(rss_items)} - {item['title'][:50]}...")
+
+        # 본문 추출
+        content = extract_article_content(item["link"])
+
+        # 데이터 구성
+        news_data = {
+            "언론사": "한국일보",
+            "제목": item["title"],
+            "날짜": item["date"],
+            "카테고리": category,
+            "기자명": item["author"],
+            "본문": content,
+        }
+
+        collected_news.append(news_data)
+
+        # 서버 부하 방지를 위한 짧은 대기
+        time.sleep(0.5)
+
+    print(f"[{category}] 총 {len(collected_news)}개 뉴스 수집 완료")
+    return collected_news
+
+
+def collect_all_news():
+    """모든 카테고리의 뉴스를 자동으로 수집하는 메인 함수"""
+    print("=== 한국일보 뉴스 자동 수집 시작 ===")
+    print(f"수집 대상: {len(rss_urls)}개 카테고리, 각 카테고리당 20개씩")
+    print(f"예상 총 뉴스 개수: {len(rss_urls) * 20}개")
+
+    all_news = []
+
+    for category, url in rss_urls.items():
         try:
-            data = json.loads(script.string)
-            if isinstance(data, dict) and 'author' in data:
-                author = data['author']
-                if isinstance(author, dict) and 'name' in author:
-                    reporter = clean_reporter_name(author['name'])
-                    return reporter
-                elif isinstance(author, str):
-                    reporter = clean_reporter_name(author)
-                    return reporter
-        except:
+            category_news = collect_news_by_category(category, url, 20)
+            all_news.extend(category_news)
+        except Exception as e:
+            print(f"[{category}] 수집 중 오류 발생: {e}")
             continue
-    
-    # 4. 본문에서 기자명 패턴 찾기
-    if content:
-        # "이름 기자", "이름 특파원" 등의 패턴
-        patterns = [
-            r'([가-힣]{2,4})\s*(기자|특파원|논설위원|편집위원)',
-            r'기자\s*([가-힣]{2,4})',
-            r'([가-힣]{2,4})\s*=',  # "기자명=" 형태
-            r'글\s*([가-힣]{2,4})',  # "글 기자명" 형태
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, content)
-            if matches:
-                if isinstance(matches[0], tuple):
-                    reporter = matches[0][0] + " 기자"
-                else:
-                    reporter = matches[0] + " 기자"
-                return reporter
-    
-    # 5. 기사 끝부분에서 이메일과 함께 있는 기자명 찾기
-    email_pattern = r'([가-힣]{2,4})\s*[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-    email_matches = re.findall(email_pattern, str(soup))
-    if email_matches:
-        reporter = email_matches[0] + " 기자"
-        return reporter
-    
-    return reporter
 
-def clean_reporter_name(name):
-    """
-    기자명 정리
-    """
-    if not name:
-        return "기자명 없음"
-    
-    # 불필요한 텍스트 제거
-    name = re.sub(r'[^\w\s가-힣]', ' ', name)
-    name = re.sub(r'\s+', ' ', name).strip()
-    
-    # 기자, 특파원 등이 포함되어 있으면 그대로 반환
-    if any(title in name for title in ['기자', '특파원', '논설위원', '편집위원']):
-        return name
-    
-    # 그렇지 않으면 " 기자" 추가
-    if name and name != "기자명 없음":
-        return name + " 기자"
-    
-    return "기자명 없음"
+    print(f"\n=== 수집 완료 ===")
+    print(f"총 수집된 뉴스: {len(all_news)}개")
 
-def is_unwanted_content(text):
-    """
-    불필요한 내용 필터링
-    """
-    unwanted_patterns = [
-        '구독하기', '좋아요', '댓글', '공유', '신고', '저작권',
-        '관련기사', '이전기사', '다음기사', '추천기사', '인기기사',
-        '광고', 'AD', '프리미엄', '구독', '로그인', '회원가입',
-        '카카오톡', '페이스북', '트위터', '네이버', '구글',
-        'ⓒ', '무단전재', '재배포금지', 'Copyright'
-    ]
-    
-    return any(pattern in text for pattern in unwanted_patterns)
+    return all_news
+
+
+def save_to_csv(news_data):
+    """수집된 뉴스 데이터를 CSV 파일로 저장하는 함수"""
+    if not news_data:
+        print("저장할 데이터가 없습니다.")
+        return None
+
+    # DataFrame 생성
+    df = pd.DataFrame(news_data)
+
+    # 열 순서 지정: 언론사, 제목, 날짜, 카테고리, 기자명, 본문
+    column_order = ["언론사", "제목", "날짜", "카테고리", "기자명", "본문"]
+    df = df[column_order]
+
+    # results 디렉토리 생성
+    os.makedirs("results", exist_ok=True)
+
+    # 타임스탬프 생성
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"results/한국일보_전체_{timestamp}.csv"
+
+    # CSV 저장 (UTF-8 인코딩)
+    df.to_csv(filename, index=False, encoding="utf-8-sig")
+
+    print(f"\nCSV 파일 저장 완료: {filename}")
+    print(f"저장된 데이터: {len(df)}행 x {len(df.columns)}열")
+    print(f"컬럼: {', '.join(df.columns)}")
+
+    # 카테고리별 통계
+    category_stats = df["카테고리"].value_counts()
+    print(f"\n카테고리별 뉴스 개수:")
+    for category, count in category_stats.items():
+        print(f"  {category}: {count}개")
+
+    return filename
+
 
 def main():
-    """
-    메인 실행 함수
-    """
-    print("경향신문 RSS 뉴스 데이터 수집을 시작합니다... (개선된 버전)")
+    """메인 실행 함수"""
+    start_time = time.time()
+
+    print("🚀 한국일보 뉴스 자동 수집을 시작합니다!")
     print("=" * 60)
-    
-    csv_file = parse_khan_rss_to_csv()
-    
-    if csv_file:
-        print("=" * 60)
-        print("데이터 수집이 완료되었습니다!")
-        print(f"저장된 파일: {csv_file}")
-        print("\n주요 개선사항:")
-        print("1. 향상된 기자명 추출 알고리즘")
-        print("2. 개선된 본문 추출 방식")
-        print("3. 날짜 형식 표준화")
-        print("4. 더 강력한 오류 처리")
-        print("5. 불필요한 내용 필터링")
+
+    # 모든 카테고리의 뉴스 수집
+    all_collected_news = collect_all_news()
+
+    # CSV 파일로 저장
+    if all_collected_news:
+        saved_filename = save_to_csv(all_collected_news)
+
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+
+        print(f"\n✅ 전체 프로세스 완료!")
+        print(f"⏱️  소요 시간: {elapsed_time:.1f}초 ({elapsed_time/60:.1f}분)")
+        print(f"📁 저장된 파일: {saved_filename}")
+        print(f"📊 수집된 총 뉴스: {len(all_collected_news)}개")
     else:
-        print("데이터 수집 중 오류가 발생했습니다.")
+        print("❌ 수집된 뉴스가 없습니다.")
+
 
 if __name__ == "__main__":
     main()
